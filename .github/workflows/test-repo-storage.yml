@@ -1,0 +1,52 @@
+
+name: 03 - Test GitHub Storage
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  storage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Generate Test Data
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p minecraft-data
+
+          {
+            echo "Minecraft Storage Test"
+            echo "Run: $GITHUB_RUN_ID"
+            echo "Time: $(date -u)"
+          } > minecraft-data/status.txt
+
+      - name: Save To Repository
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add minecraft-data/status.txt
+
+          if git diff --cached --quiet; then
+            echo "No changes."
+            exit 0
+          fi
+
+          git commit -m "Save Minecraft test data"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+          echo "GITHUB_STORAGE_OK"
