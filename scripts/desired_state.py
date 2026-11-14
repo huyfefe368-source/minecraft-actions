@@ -3,18 +3,35 @@
 import argparse
 import json
 import subprocess
+import time
 
-def running(remote="drive:Minecraft-Hosting"):
+def read_once(remote="drive:Minecraft-Hosting"):
     try:
         result=subprocess.run(
             ["rclone","cat",remote.rstrip("/")+"/metadata/desired-state.json"],
             capture_output=True,text=True,timeout=30,check=False)
-        if result.returncode or len(result.stdout)>4096:
-            return False
+        if result.returncode:
+            return None
+        if len(result.stdout)>4096:
+            return "invalid"
         state=json.loads(result.stdout)
-        return isinstance(state,dict) and state.get("desired")=="running"
+        if isinstance(state,dict) and state.get("desired") in ("running","stopped"):
+            return state["desired"]
+        return "invalid"
     except (OSError,ValueError,subprocess.TimeoutExpired):
-        return False
+        return None
+
+def running(remote="drive:Minecraft-Hosting"):
+    for attempt in range(3):
+        state=read_once(remote)
+        if state == "running":
+            return True
+        if state in ("stopped", "invalid"):
+            return False
+        # Fail closed on transient Google API outage but tolerate brief 5xx.
+        if attempt < 2:
+            time.sleep(2)
+    return False
 
 if __name__=="__main__":
     p=argparse.ArgumentParser()
