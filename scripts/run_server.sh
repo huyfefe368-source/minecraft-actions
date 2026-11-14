@@ -10,20 +10,8 @@ mkdir -p "$HOME/.config/rclone" server "$RUNNER_TEMP/mc-snapshot" "$HOME/.ssh"
 printf '%s' "$RCLONE_CONFIG_B64" | base64 -d > "$HOME/.config/rclone/rclone.conf"
 chmod 600 "$HOME/.config/rclone/rclone.conf"
 rclone lsd "$DRIVE_BASE" >/dev/null
-if [[ -n "${RESTORE_BACKUP:-}" ]]; then
-  [[ "$RESTORE_BACKUP" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+\.tar\.gz$ ]] || { echo 'Invalid backup name'; exit 1; }
-  rclone copyto "$DRIVE_BASE/backups/$RESTORE_BACKUP" "$RUNNER_TEMP/restore.tar.gz"
-  if tar -tzf "$RUNNER_TEMP/restore.tar.gz" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
-    echo 'Unsafe backup archive'; exit 1
-  fi
-  tar -xzf "$RUNNER_TEMP/restore.tar.gz" -C server --no-same-owner --no-same-permissions
-  echo "RESTORED_BACKUP=$RESTORE_BACKUP"
-elif rclone lsf "$DRIVE_BASE/live" >/dev/null 2>&1; then
-  rclone sync "$DRIVE_BASE/live" server --transfers 4 --checkers 8
-  echo DRIVE_RESTORE_OK
-else
-  echo DRIVE_NEW_WORLD
-fi
+python3 scripts/world_store.py restore --server server --temp "$RUNNER_TEMP" \
+  --drive "$DRIVE_BASE" --backup "${RESTORE_BACKUP:-}"
 
 AGENT="minecraft-hosting/1.0 (https://github.com/$GITHUB_REPOSITORY)"
 BUILDS="https://fill.papermc.io/v3/projects/paper/versions/26.3/builds"
@@ -63,27 +51,22 @@ SSH_PID=''
 CONTROL_PID=''
 PAPER_STARTED=false
 backup() {
-  local kind="${1:-periodic}" stamp archive ret
-  stamp=$(date -u +%Y%m%dT%H%M%SZ)
-  echo "DRIVE_BACKUP_START type=$kind time=$stamp"
+  local kind="${1:-periodic}" snapshot_rc=0
+  echo "DRIVE_BACKUP_START type=$kind at=$(date -u +%Y%m%dT%H%M%SZ)"
+  python3 scripts/world_store.py check-space --source server --temp "$RUNNER_TEMP" || return 1
   if [[ -n "$PAPER_PID" ]] && kill -0 "$PAPER_PID" 2>/dev/null; then
     printf 'save-off\nsave-all flush\n' >&3
     sleep 5
   fi
-  ret=0
   rsync -a --delete --exclude paper.jar --exclude console.fifo --exclude server.log \
-    server/ "$RUNNER_TEMP/mc-snapshot/" || ret=1
+    server/ "$RUNNER_TEMP/mc-snapshot/" || snapshot_rc=1
   if [[ -n "$PAPER_PID" ]] && kill -0 "$PAPER_PID" 2>/dev/null; then
     printf 'save-on\n' >&3 || :
   fi
-  [[ "$ret" == 0 ]] || { echo 'SNAPSHOT_FAILED'; return 1; }
-  archive="$RUNNER_TEMP/minecraft-$stamp.tar.gz"
-  tar -czf "$archive" -C "$RUNNER_TEMP/mc-snapshot" .
-  rclone copyto "$archive" "$DRIVE_BASE/backups/$stamp-$GITHUB_RUN_ID.tar.gz" --retries 3
-  rm -f "$archive"
-  rclone sync "$RUNNER_TEMP/mc-snapshot/" "$DRIVE_BASE/live" \
-    --transfers 4 --checkers 8 --retries 3
-  echo "DRIVE_BACKUP_OK type=$kind time=$stamp"
+  [[ "$snapshot_rc" -eq 0 ]] || { echo 'SNAPSHOT_COPY_FAILED'; return 1; }
+  python3 scripts/world_store.py backup --source "$RUNNER_TEMP/mc-snapshot" \
+    --temp "$RUNNER_TEMP" --drive "$DRIVE_BASE" --run-id "$GITHUB_RUN_ID"
+  echo "DRIVE_BACKUP_OK type=$kind"
 }
 cleanup() {
   local rc=$?
@@ -126,7 +109,7 @@ ssh -NT -i "$KEYFILE" -o BatchMode=yes -o IdentitiesOnly=yes \
   -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
   -R 127.0.0.1:25566:127.0.0.1:25565 \
   -R 127.0.0.1:25567:127.0.0.1:25567 \
-  "$VPS_USER$@VPS_HOST" &
+  "${VPS_USER}@${VPS_HOST}" &
 SSH_PID=$!
 sleep 4
 kill -0 "$SSH_PID" || { echo 'Tunnel failed'; exit 1; }
