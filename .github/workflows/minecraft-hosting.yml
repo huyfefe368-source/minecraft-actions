@@ -40,11 +40,16 @@ jobs:
           echo "CPU cores: $(nproc)"
           free -h
           df -h .
-      - name: Install Java 25
+      - name: Install panel-selectable Java runtimes
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '25'
+          java-version: |
+            8
+            11
+            17
+            21
+            25
       - name: Install verified rclone v1.76.0
         shell: bash
         run: |

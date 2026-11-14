@@ -102,9 +102,11 @@ def backup_world(server: Path, store, tmp: Path, run_id: int, stamp: str | None 
             raise SnapshotError("Remote uploaded archive failed SHA-256 verification")
         manifest_json=json.dumps(manifest,sort_keys=True).encode()
         store.put("backups/"+name+".json",manifest_json)
+        store.put("metadata/live-state.json",b'{"state":"updating"}')
         store.sync(snapshot,"live")
         store.check(snapshot,"live")
-        # This is the only commit marker. If live sync failed, the old marker remains.
+        store.put("metadata/live-state.json",b'{"state":"ready"}')
+        # World checkpoint remains versioned, independent of live folder edits.
         store.put("metadata/current.json",manifest_json)
     except (OSError,IOError,subprocess.CalledProcessError) as exc:
         raise SnapshotError("Backup failed; last known good checkpoint remains") from None
@@ -118,8 +120,10 @@ def mirror_live(server: Path, store) -> dict:
     """
     source = Path(server)
     source_size(source)
+    store.put("metadata/live-state.json",b'{"state":"updating"}')
     store.sync(source, "live")
     store.check(source, "live")
+    store.put("metadata/live-state.json",b'{"state":"ready"}')
     marker = {
         "synced_at": datetime.now(timezone.utc).isoformat(),
         "mode": "verified-raw-files",
@@ -175,6 +179,38 @@ def restore_world(target: Path, store, tmp: Path, backup: str | None = None)->st
     validate_and_extract(archive,target,expected)
     return "restored"
 
+def restore_server(target: Path, store, tmp: Path, backup: str | None = None) -> str:
+    """Offline edits in Drive/live are the next server contents.
+
+    An explicitly selected archive is restored instead. An interrupted live
+    mirror is never trusted; fall back to an existing verified checkpoint.
+    """
+    if backup:
+        return restore_world(target,store,tmp,backup)
+    target=Path(target)
+    if target.exists() and any(target.iterdir()):
+        raise SnapshotError("Restore target is not empty")
+    live=store.list_files("live")
+    if live:
+        marker=store.read("metadata/live-state.json")
+        if marker is not None:
+            try:
+                state=json.loads(marker)["state"]
+            except (ValueError,KeyError,TypeError):
+                raise SnapshotError("Malformed live synchronization checkpoint") from None
+            if state=="updating":
+                return restore_world(target,store,tmp)
+            if state!="ready":
+                raise SnapshotError("Invalid live synchronization checkpoint")
+        target.mkdir(parents=True,exist_ok=True)
+        store.download_live(target)
+        store.check_live(target)
+        return "live"
+    if store.list_files("backups"):
+        return restore_world(target,store,tmp)
+    target.mkdir(parents=True,exist_ok=True)
+    return "new"
+
 class RcloneStore:
     def __init__(self,remote="drive:Minecraft-Hosting"):
         self.remote=remote.rstrip('/')
@@ -200,6 +236,10 @@ class RcloneStore:
     def check(self,source,key):self._exec(["check",str(source),self._r(key),"--one-way"],timeout=1200)
     def list_files(self,key):
         return self._exec(["lsf",self._r(key)],timeout=60).decode().splitlines()
+    def download_live(self,target):
+        self._exec(["copy",self._r("live"),str(target),"--transfers","4"],timeout=1800)
+    def check_live(self,target):
+        self._exec(["check",self._r("live"),str(target),"--one-way"],timeout=1800)
     def read(self,key):
         try:
             return self._exec(["cat",self._r(key)],timeout=60)
@@ -252,7 +292,7 @@ class RcloneStore:
 
 def main():
     parser=argparse.ArgumentParser()
-    parser.add_argument("action",choices=("backup","restore","check-space","sync-live"))
+    parser.add_argument("action",choices=("backup","restore","restore-live","check-space","sync-live"))
     parser.add_argument("--source",type=Path)
     parser.add_argument("--server",type=Path)
     parser.add_argument("--temp",type=Path,required=True)
@@ -271,6 +311,9 @@ def main():
         elif args.action=="backup":
             result=backup_world(args.source,store,args.temp,args.run_id,snapshot_ready=True)
             print("DRIVE_BACKUP_VERIFIED="+result['backup_name'])
+        elif args.action=="restore-live":
+            result=restore_server(args.server,store,args.temp,args.backup or None)
+            print("DRIVE_RESTORE="+result)
         elif args.action=="restore":
             result=restore_world(args.server,store,args.temp,args.backup or None)
             print("DRIVE_RESTORE="+result)

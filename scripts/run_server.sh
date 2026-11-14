@@ -12,24 +12,15 @@ rclone lsd "$DRIVE_BASE" >/dev/null
 python3 scripts/desired_state.py check --drive "$DRIVE_BASE" || {
   echo 'SERVER_STOPPED_BY_OWNER'; exit 0;
 }
-python3 scripts/world_store.py restore --server server --temp "$RUNNER_TEMP" \
+python3 scripts/world_store.py restore-live --server server --temp "$RUNNER_TEMP" \
   --drive "$DRIVE_BASE" --backup "${RESTORE_BACKUP:-}"
 
 python3 scripts/desired_state.py check --drive "$DRIVE_BASE" || {
   echo 'OWNER_STOPPED_DURING_RESTORE'; exit 0;
 }
-if [[ -s server/paper.jar ]]; then
-  echo 'PAPER_JAR_RESTORED_FROM_DRIVE'
-else
-  AGENT="minecraft-hosting/1.0 (https://github.com/$GITHUB_REPOSITORY)"
-  BUILDS="https://fill.papermc.io/v3/projects/paper/versions/26.3/builds"
-  JSON=$(curl -fsSL --retry 3 -H "User-Agent: $AGENT" "$BUILDS")
-  URL=$(jq -er '[.[] | select(.channel == "STABLE")][0].downloads."server:default".url' <<< "$JSON")
-  SHA=$(jq -er '[.[] | select(.channel == "STABLE")][0].downloads."server:default".checksums.sha256' <<< "$JSON")
-  curl -fsSL --retry 3 -H "User-Agent: $AGENT" -o server/paper.jar "$URL"
-  echo "$SHA  server/paper.jar" | sha256sum -c -
-  echo 'PAPER_JAR_DOWNLOADED_AND_VERIFIED'
-fi
+# Minecraft distribution and version are selected by the panel and server files.
+# GitHub Actions only supplies the VM. Never download a fixed Paper release.
+python3 scripts/startup.py prepare --output "$RUNNER_TEMP/mc-startup.json"
 echo eula=true > server/eula.txt
 if [[ ! -f server/server.properties ]]; then
   cat > server/server.properties <<'PROPS'
@@ -39,10 +30,11 @@ online-mode=true
 max-players=20
 view-distance=8
 simulation-distance=6
-motd=Minecraft GitHub Hosting
+motd=Minecraft Hosting
 enable-rcon=false
 PROPS
 fi
+# The public VPS gateway forwards these internal ports.
 sed -i -e 's/^server-ip=.*/server-ip=127.0.0.1/' -e 's/^server-port=.*/server-port=25565/' server/server.properties
 
 KEYFILE="$RUNNER_TEMP/mc-tunnel.key"
@@ -146,9 +138,8 @@ python3 scripts/desired_state.py check --drive "$DRIVE_BASE" || {
 
 (
   cd server
-  java -Xms2G -Xmx12G -XX:+UseG1GC -XX:+ParallelRefProcEnabled \
-    -XX:MaxGCPauseMillis=200 -jar paper.jar --nogui \
-    < console.fifo > server.log 2>&1
+  python3 ../scripts/startup.py launch --config "$RUNNER_TEMP/mc-startup.json" \
+    --root . < console.fifo > server.log 2>&1
 ) &
 PAPER_PID=$!
 PAPER_STARTED=true
@@ -165,12 +156,12 @@ sleep 4
 kill -0 "$SSH_PID" || { echo 'Tunnel failed'; exit 1; }
 ready=false
 for i in $(seq 1 120); do
-  if grep -Fq 'Done (' server/server.log; then ready=true; break; fi
-  kill -0 "$PAPER_PID" || { echo 'Paper exited'; tail -n 60 server/server.log; exit 1; }
+  if python3 -c 'import socket; c=socket.create_connection(("127.0.0.1",25565),timeout=1); c.close()' 2>/dev/null; then ready=true; break; fi
+  kill -0 "$PAPER_PID" || { echo 'Server process exited'; tail -n 60 server/server.log; exit 1; }
   sleep 2
 done
-[[ "$ready" == true ]] || { echo 'Paper startup timeout'; exit 1; }
-echo "MINECRAFT_READY address=$VPS_HOST:25565 heap=12G"
+[[ "$ready" == true ]] || { echo 'Server startup timeout'; exit 1; }
+echo "MINECRAFT_READY address=$VPS_HOST:25565 startup=panel-configured"
 # Persist the first world/config/plugin tree before accepting a long session.
 backup initial || { echo 'INITIAL_BACKUP_FAILED'; exit 1; }
 deadline=$((SECONDS + 16200))
