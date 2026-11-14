@@ -1,0 +1,151 @@
+name: 04 - Minecraft VPS Tunnel Playtest
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: minecraft-gateway-playtest
+  cancel-in-progress: false
+
+jobs:
+  playtest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      VPS_HOST: 160.191.51.148
+      VPS_USER: mcbridge
+      VPS_HOST_FINGERPRINT: SHA256:RVTCTS7egIm44gW78qATnuIF3UNdxU/2EI9oUMSIhds
+
+    steps:
+      - name: Confirm Minecraft EULA
+        shell: bash
+        env:
+          EULA: ${{ vars.ACCEPT_MINECRAFT_EULA }}
+        run: |
+          test "$EULA" = "TRUE" || { echo "Accept EULA first"; exit 1; }
+
+      - name: Install Java 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Download Paper 26.3
+        shell: bash
+        run: |
+          set -euo pipefail
+          AGENT="minecraft-tunnel-playtest/1.0 (https://github.com/${GITHUB_REPOSITORY})"
+          API="https://fill.papermc.io/v3/projects/paper/versions/26.3/builds"
+          JSON=$(curl -fsSL --retry 3 -H "User-Agent: $AGENT" "$API")
+          URL=$(jq -er '[.[] | select(.channel == "STABLE")][0].downloads."server:default".url' <<< "$JSON")
+          SHA=$(jq -er '[.[] | select(.channel == "STABLE")][0].downloads."server:default".checksums.sha256' <<< "$JSON")
+          mkdir -p server
+          curl -fsSL --retry 3 -H "User-Agent: $AGENT" -o server/paper.jar "$URL"
+          echo "$SHA  server/paper.jar" | sha256sum -c -
+          echo 'eula=true' > server/eula.txt
+          cat > server/server.properties <<'PROPERTIES'
+          server-ip=127.0.0.1
+          server-port=25565
+          online-mode=true
+          max-players=5
+          view-distance=6
+          simulation-distance=4
+          motd=VPS Gateway Playtest
+          PROPERTIES
+
+      - name: Start Paper and secure reverse tunnel
+        shell: bash
+        env:
+          TUNNEL_PRIVATE_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$TUNNEL_PRIVATE_KEY" || { echo 'Missing VPS_SSH_KEY secret'; exit 1; }
+
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+          KEYFILE="$RUNNER_TEMP/minecraft-tunnel-key"
+          printf '%s\n' "$TUNNEL_PRIVATE_KEY" > "$KEYFILE"
+          chmod 600 "$KEYFILE"
+
+          ssh-keyscan -T 10 -t ed25519 "$VPS_HOST" > "$HOME/.ssh/known_hosts" 2>/dev/null
+          chmod 600 "$HOME/.ssh/known_hosts"
+          FOUND_FINGERPRINT=$(ssh-keygen -lf "$HOME/.ssh/known_hosts" | awk '{print $2}')
+          if [[ "$FOUND_FINGERPRINT" != "$VPS_HOST_FINGERPRINT" ]]; then
+            echo 'SSH host key fingerprint mismatch'; exit 1
+          fi
+
+          SSH_PID=''
+          PAPER_PID=''
+          cleanup() {
+            set +e
+            if [[ -n "$PAPER_PID" ]] && kill -0 "$PAPER_PID" 2>/dev/null; then
+              printf 'stop\n' >&3
+              for i in $(seq 1 25); do
+                kill -0 "$PAPER_PID" 2>/dev/null || break
+                sleep 1
+              done
+              kill "$PAPER_PID" 2>/dev/null || true
+              wait "$PAPER_PID" 2>/dev/null || true
+            fi
+            if [[ -n "$SSH_PID" ]]; then
+              kill "$SSH_PID" 2>/dev/null || true
+              wait "$SSH_PID" 2>/dev/null || true
+            fi
+            exec 3>&- 2>/dev/null || true
+            rm -f "$KEYFILE"
+          }
+          trap cleanup EXIT
+
+          # VPS port 25566 binds only to localhost; gateway exposes public 25565.
+          ssh -NT \
+            -i "$KEYFILE" \
+            -o BatchMode=yes \
+            -o ExitOnForwardFailure=yes \
+            -o ServerAliveInterval=15 \
+            -o ServerAliveCountMax=3 \
+            -R 127.0.0.1:25566:127.0.0.1:25565 \
+            "$VPS_USER@$VPS_HOST" &
+          SSH_PID=$!
+          sleep 3
+          kill -0 "$SSH_PID" 2>/dev/null || { echo 'SSH tunnel failed'; exit 1; }
+          echo 'TUNNEL_READY'
+
+          mkfifo server/console.fifo
+          exec 3<>server/console.fifo
+          (
+            cd server
+            java -Xms1G -Xmx6G -jar paper.jar --nogui \
+              < console.fifo > server.log 2>&1
+          ) &
+          PAPER_PID=$!
+
+          ready=false
+          for i in $(seq 1 120); do
+            if grep -Fq 'Done (' server/server.log; then
+              ready=true; break
+            fi
+            if ! kill -0 "$PAPER_PID" 2>/dev/null; then
+              echo 'Paper quit unexpectedly'; tail -n 100 server/server.log; exit 1
+            fi
+            sleep 2
+          done
+          if [[ "$ready" != true ]]; then
+            echo 'Paper startup timeout'; tail -n 100 server/server.log; exit 1
+          fi
+
+          echo '====================================='
+          echo 'MINECRAFT_READY'
+          echo 'ADDRESS: 160.191.51.148:25565'
+          echo 'Keep this workflow running while testing!'
+          echo '====================================='
+          tail -n 20 server/server.log
+
+          for i in $(seq 1 180); do
+            kill -0 "$SSH_PID" 2>/dev/null || { echo 'SSH tunnel disconnected'; exit 1; }
+            kill -0 "$PAPER_PID" 2>/dev/null || { echo 'Paper stopped'; exit 1; }
+            sleep 5
+          done
+          echo 'Playtest window finished.'
