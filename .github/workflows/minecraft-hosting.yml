@@ -45,6 +45,20 @@ jobs:
         with:
           distribution: temurin
           java-version: '25'
+      - name: Install verified rclone v1.76.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=v1.76.0
+          name=rclone-$version-linux-amd64.zip
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$name" "https://downloads.rclone.org/$version/$name"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/SHA256SUMS" "https://downloads.rclone.org/$version/SHA256SUMS"
+          cd "$RUNNER_TEMP"
+          grep -E "[[:space:]]$name$" SHA256SUMS | sha256sum -c -
+          unzip -p "$name" "rclone-$version-linux-amd64/rclone" > rclone
+          chmod 755 rclone
+          sudo install -m 755 rclone /usr/local/bin/rclone
+          rclone version | head -1
       - name: Start Minecraft and persistent Drive backup
         shell: bash
         run: bash scripts/run_server.sh

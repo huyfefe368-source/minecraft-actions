@@ -16,10 +16,11 @@ import re
 import shutil
 import subprocess
 import tarfile
+import threading
 import time
 
 RESERVE = 2 * 1024**3
-SKIP = {"paper.jar", "console.fifo", "server.log"}
+SKIP = {"console.fifo"}
 BACKUP_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9]+\.tar\.gz$")
 class SnapshotError(RuntimeError): pass
 
@@ -109,6 +110,24 @@ def backup_world(server: Path, store, tmp: Path, run_id: int, stamp: str | None 
         raise SnapshotError("Backup failed; last known good checkpoint remains") from None
     return manifest
 
+def mirror_live(server: Path, store) -> dict:
+    """Incremental raw-file mirror from a saved snapshot.
+
+    The recovery checkpoint remains the last verified versioned backup.
+    Partial mirror changes cannot become the automatic restore source.
+    """
+    source = Path(server)
+    source_size(source)
+    store.sync(source, "live")
+    store.check(source, "live")
+    marker = {
+        "synced_at": datetime.now(timezone.utc).isoformat(),
+        "mode": "verified-raw-files",
+    }
+    store.put("metadata/live-last-sync.json",
+              json.dumps(marker, sort_keys=True).encode())
+    return marker
+
 def restore_world(target: Path, store, tmp: Path, backup: str | None = None)->str:
     target=Path(target)
     tmp=Path(tmp)
@@ -166,17 +185,19 @@ class RcloneStore:
     def _exec(self,args,input_bytes=None,timeout=180):
         try:
             p=subprocess.run(["rclone",*args],input=input_bytes,capture_output=True,timeout=timeout)
-        except (OSError,subprocess.TimeoutExpired):
-            raise SnapshotError("Google Drive unavailable") from None
+        except subprocess.TimeoutExpired:
+            raise SnapshotError("Google Drive "+str(args[0])+" timed out after "+str(timeout)+" seconds") from None
+        except OSError:
+            raise SnapshotError("Google Drive command unavailable") from None
         if p.returncode:
-            raise SnapshotError("Google Drive operation failed")
+            raise SnapshotError("Google Drive "+str(args[0])+" failed")
         return p.stdout
 
-    def upload(self,file,key): self._exec(["copyto",str(file),self._r(key)],timeout=600)
-    def download(self,key,file): self._exec(["copyto",self._r(key),str(file)],timeout=600)
+    def upload(self,file,key): self._exec(["copyto",str(file),self._r(key)],timeout=1200)
+    def download(self,key,file): self._exec(["copyto",self._r(key),str(file)],timeout=1200)
     def put(self,key,content:bytes):self._exec(["rcat",self._r(key)],input_bytes=content)
-    def sync(self,source,key):self._exec(["sync",str(source),self._r(key),"--transfers","4"],timeout=600)
-    def check(self,source,key):self._exec(["check",str(source),self._r(key),"--one-way"],timeout=600)
+    def sync(self,source,key):self._exec(["sync",str(source),self._r(key),"--transfers","4"],timeout=1200)
+    def check(self,source,key):self._exec(["check",str(source),self._r(key),"--one-way"],timeout=1200)
     def list_files(self,key):
         return self._exec(["lsf",self._r(key)],timeout=60).decode().splitlines()
     def read(self,key):
@@ -201,17 +222,37 @@ class RcloneStore:
         try:
             proc=subprocess.Popen(["rclone","cat",self._r(key)],
                                   stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
-        except OSError: raise SnapshotError("Drive read unavailable") from None
+        except OSError:
+            raise SnapshotError("Drive read unavailable") from None
+        # Timeout must include the streaming read, not just proc.wait().
+        timeout_hit=threading.Event()
+        def on_timeout():
+            timeout_hit.set()
+            proc.kill()
+        timer=threading.Timer(1200,on_timeout)
+        timer.daemon=True
+        timer.start()
         d=hashlib.sha256()
-        with proc.stdout as stream:
-            for chunk in iter(lambda:stream.read(1024*1024),b''):d.update(chunk)
-        if proc.wait(timeout=600):
+        try:
+            with proc.stdout as stream:
+                for chunk in iter(lambda:stream.read(1024*1024),b''):
+                    d.update(chunk)
+            code=proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            raise SnapshotError("Drive remote checksum read timed out") from None
+        finally:
+            timer.cancel()
+        if timeout_hit.is_set():
+            raise SnapshotError("Drive remote checksum read timed out")
+        if code:
             raise SnapshotError("Remote checksum read failed")
         return d.hexdigest()
 
 def main():
     parser=argparse.ArgumentParser()
-    parser.add_argument("action",choices=("backup","restore","check-space"))
+    parser.add_argument("action",choices=("backup","restore","check-space","sync-live"))
     parser.add_argument("--source",type=Path)
     parser.add_argument("--server",type=Path)
     parser.add_argument("--temp",type=Path,required=True)
@@ -224,6 +265,9 @@ def main():
         if args.action=="check-space":
             required_free_bytes(source_size(args.source),shutil.disk_usage(args.temp).free)
             print("SSD_SPACE_OK")
+        elif args.action=="sync-live":
+            mirror_live(args.source,store)
+            print("DRIVE_LIVE_MIRROR_VERIFIED")
         elif args.action=="backup":
             result=backup_world(args.source,store,args.temp,args.run_id,snapshot_ready=True)
             print("DRIVE_BACKUP_VERIFIED="+result['backup_name'])

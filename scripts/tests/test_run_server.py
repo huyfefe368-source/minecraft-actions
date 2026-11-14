@@ -50,7 +50,7 @@ def test_restores_known_good_live(tmp_path):
     target=tmp_path/'restored'
     assert restore_world(target,d,tmp_path/'recover')=='restored'
     assert (target/'world'/'region.dat').read_bytes()==b'world-data\x00\xff'
-    assert not (target/'paper.jar').exists()
+    assert (target/'paper.jar').read_bytes()==b'never-backup-jar'
     assert manifest['verified']
 
 def test_rejects_archive_parent_or_symlink_entries(tmp_path):
@@ -185,3 +185,46 @@ def test_new_world_requires_no_existing_files(tmp_path):
     with pytest.raises(SnapshotError, match="not empty"):
         restore_world(target,drive,tmp_path/'recover')
     assert (target/'world.dat').read_bytes()==b'not empty'
+
+def test_world_backup_includes_normal_files_and_folders(tmp_path):
+    from scripts.world_store import archive_world
+    source=sample_world(tmp_path)
+    (source/'server.log').write_text('server startup log')
+    (source/'plugins').mkdir()
+    (source/'plugins'/'Example.jar').write_bytes(b'plugin-data')
+    import os
+    os.mkfifo(source/'console.fifo')
+    archive=tmp_path/'snapshot.tar.gz'
+    archive_world(source,archive)
+    with tarfile.open(archive,'r:gz') as tf:
+        names=set(tf.getnames())
+    assert 'paper.jar' in names
+    assert 'server.log' in names
+    assert 'plugins/Example.jar' in names
+    assert 'world/region.dat' in names
+    assert 'console.fifo' not in names
+
+def test_incremental_raw_mirror_does_not_change_recovery_checkpoint(tmp_path):
+    from scripts.world_store import mirror_live
+    source=sample_world(tmp_path)
+    drive=FakeDrive()
+    drive.data['metadata/current.json']=b'untouched'
+    result=mirror_live(source,drive)
+    assert result['mode']=='verified-raw-files'
+    assert ('sync','live') in drive.actions
+    assert ('check','live') in drive.actions
+    assert drive.data['metadata/current.json']==b'untouched'
+    assert 'metadata/live-last-sync.json' in drive.data
+
+def test_backup_failure_cannot_claim_success():
+    source=(Path(__file__).resolve().parents[2]/'scripts/run_server.sh').read_text()
+    assert 'DRIVE_BACKUP_FAILED type=' in source
+    assert 'INITIAL_BACKUP_FAILED' in source
+    assert 'backup initial ||' in source
+    assert 'sync-live' in source
+
+def test_official_rclone_installer_sha_verified():
+    wf=(Path(__file__).resolve().parents[2]/'.github/workflows/minecraft-hosting.yml').read_text()
+    assert 'rclone-v1.76.0' not in wf or 'v1.76.0' in wf
+    assert 'sha256sum -c -' in wf
+    assert 'sudo install -m 755 rclone' in wf

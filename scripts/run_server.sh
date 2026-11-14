@@ -5,7 +5,6 @@ set -euo pipefail
 [[ -n "$MC_CONTROL_TOKEN" ]] || { echo "MC_CONTROL_TOKEN missing"; exit 1; }
 [[ -n "$TUNNEL_PRIVATE_KEY_B64" ]] || { echo "VPS_SSH_KEY_B64 missing"; exit 1; }
 echo "RUNNER CPU=$(nproc), RAM=$(free -h | awk '/^Mem:/ {print $2}')"
-sudo apt-get install -y rclone
 mkdir -p "$HOME/.config/rclone" server "$RUNNER_TEMP/mc-snapshot" "$HOME/.ssh"
 printf '%s' "$RCLONE_CONFIG_B64" | base64 -d > "$HOME/.config/rclone/rclone.conf"
 chmod 600 "$HOME/.config/rclone/rclone.conf"
@@ -19,13 +18,18 @@ python3 scripts/world_store.py restore --server server --temp "$RUNNER_TEMP" \
 python3 scripts/desired_state.py check --drive "$DRIVE_BASE" || {
   echo 'OWNER_STOPPED_DURING_RESTORE'; exit 0;
 }
-AGENT="minecraft-hosting/1.0 (https://github.com/$GITHUB_REPOSITORY)"
-BUILDS="https://fill.papermc.io/v3/projects/paper/versions/26.3/builds"
-JSON=$(curl -fsSL --retry 3 -H "User-Agent: $AGENT" "$BUILDS")
-URL=$(jq -er '[.[] | select(.channel == "STABLE")][0].downloads."server:default".url' <<< "$JSON")
-SHA=$(jq -er '[.[] | select(.channel == "STABLE")][0].downloads."server:default".checksums.sha256' <<< "$JSON")
-curl -fsSL --retry 3 -H "User-Agent: $AGENT" -o server/paper.jar "$URL"
-echo "$SHA  server/paper.jar" | sha256sum -c -
+if [[ -s server/paper.jar ]]; then
+  echo 'PAPER_JAR_RESTORED_FROM_DRIVE'
+else
+  AGENT="minecraft-hosting/1.0 (https://github.com/$GITHUB_REPOSITORY)"
+  BUILDS="https://fill.papermc.io/v3/projects/paper/versions/26.3/builds"
+  JSON=$(curl -fsSL --retry 3 -H "User-Agent: $AGENT" "$BUILDS")
+  URL=$(jq -er '[.[] | select(.channel == "STABLE")][0].downloads."server:default".url' <<< "$JSON")
+  SHA=$(jq -er '[.[] | select(.channel == "STABLE")][0].downloads."server:default".checksums.sha256' <<< "$JSON")
+  curl -fsSL --retry 3 -H "User-Agent: $AGENT" -o server/paper.jar "$URL"
+  echo "$SHA  server/paper.jar" | sha256sum -c -
+  echo 'PAPER_JAR_DOWNLOADED_AND_VERIFIED'
+fi
 echo eula=true > server/eula.txt
 if [[ ! -f server/server.properties ]]; then
   cat > server/server.properties <<'PROPS'
@@ -77,22 +81,32 @@ dispatch_next() {
   echo 'SUCCESSOR_WORKFLOW_DISPATCH_FAILED'
   return 1
 }
-backup() {
-  local kind="${1:-periodic}" snapshot_rc=0
-  echo "DRIVE_BACKUP_START type=$kind at=$(date -u +%Y%m%dT%H%M%SZ)"
+snapshot_server() {
+  local snapshot_rc=0
   python3 scripts/world_store.py check-space --source server --temp "$RUNNER_TEMP" || return 1
   if [[ -n "$PAPER_PID" ]] && kill -0 "$PAPER_PID" 2>/dev/null; then
     printf 'save-off\nsave-all flush\n' >&3
     sleep 5
   fi
-  rsync -a --delete --exclude paper.jar --exclude console.fifo --exclude server.log \
-    server/ "$RUNNER_TEMP/mc-snapshot/" || snapshot_rc=1
+  rsync -a --delete --exclude console.fifo     server/ "$RUNNER_TEMP/mc-snapshot/" || snapshot_rc=1
   if [[ -n "$PAPER_PID" ]] && kill -0 "$PAPER_PID" 2>/dev/null; then
     printf 'save-on\n' >&3 || :
   fi
   [[ "$snapshot_rc" -eq 0 ]] || { echo 'SNAPSHOT_COPY_FAILED'; return 1; }
-  python3 scripts/world_store.py backup --source "$RUNNER_TEMP/mc-snapshot" \
-    --temp "$RUNNER_TEMP" --drive "$DRIVE_BASE" --run-id "$GITHUB_RUN_ID"
+}
+mirror_live() {
+  echo "DRIVE_LIVE_SYNC_START at=$(date -u +%Y%m%dT%H%M%SZ)"
+  snapshot_server || return 1
+  python3 scripts/world_store.py sync-live --source "$RUNNER_TEMP/mc-snapshot"     --temp "$RUNNER_TEMP" --drive "$DRIVE_BASE" || return 1
+}
+backup() {
+  local kind="$1"
+  echo "DRIVE_BACKUP_START type=$kind at=$(date -u +%Y%m%dT%H%M%SZ)"
+  snapshot_server || return 1
+  python3 scripts/world_store.py backup --source "$RUNNER_TEMP/mc-snapshot"     --temp "$RUNNER_TEMP" --drive "$DRIVE_BASE" --run-id "$GITHUB_RUN_ID" || {
+      echo "DRIVE_BACKUP_FAILED type=$kind"
+      return 1
+    }
   echo "DRIVE_BACKUP_OK type=$kind"
 }
 cleanup() {
@@ -157,8 +171,11 @@ for i in $(seq 1 120); do
 done
 [[ "$ready" == true ]] || { echo 'Paper startup timeout'; exit 1; }
 echo "MINECRAFT_READY address=$VPS_HOST:25565 heap=12G"
-deadline=$((SECONDS + 18000))
+# Persist the first world/config/plugin tree before accepting a long session.
+backup initial || { echo 'INITIAL_BACKUP_FAILED'; exit 1; }
+deadline=$((SECONDS + 16200))
 next_backup=$((SECONDS + 900))
+next_live_sync=$((SECONDS + 180))
 next_state_check=$((SECONDS + 30))
 while (( SECONDS < deadline )); do
   sleep 5
@@ -185,6 +202,10 @@ while (( SECONDS < deadline )); do
   if (( SECONDS >= next_backup )); then
     backup periodic || echo "PERIODIC_BACKUP_FAILED; retry on next interval"
     next_backup=$((SECONDS + 900))
+    next_live_sync=$((SECONDS + 180))
+  elif (( SECONDS >= next_live_sync )); then
+    mirror_live || echo "LIVE_MIRROR_FAILED; retry next interval"
+    next_live_sync=$((SECONDS + 180))
   fi
 done
 ROLLOVER_READY=true
