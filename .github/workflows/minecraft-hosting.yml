@@ -2,6 +2,11 @@ name: Minecraft Hosting - Drive Storage and Panel
 
 on:
   workflow_dispatch:
+    inputs:
+      restore_backup:
+        description: "Optional backup file from Drive/backups"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -19,6 +24,7 @@ jobs:
       VPS_USER: mcbridge
       VPS_HOST_FINGERPRINT: SHA256:RVTCTS7egIm44gW78qATnuIF3UNdxU/2EI9oUMSIhds
       DRIVE_BASE: drive:Minecraft-Hosting
+      RESTORE_BACKUP: ${{ inputs.restore_backup }}
       MC_CONTROL_TOKEN: ${{ secrets.MC_CONTROL_TOKEN }}
       RCLONE_CONFIG_B64: ${{ secrets.RCLONE_CONFIG_B64 }}
       TUNNEL_PRIVATE_KEY_B64: ${{ secrets.VPS_SSH_KEY_B64 }}

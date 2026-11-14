@@ -153,6 +153,16 @@ class Handler(BaseHTTPRequestHandler):
                         return self.send(409, {"error": "Drive OAuth secret not configured"})
                     run(["gh", "workflow", "run", WORKFLOW, "-R", REPO])
                     return self.send(200, {"ok": True, "message": "GitHub Actions dispatched"})
+                if path.path == "/api/restore":
+                    _, current = active()
+                    if current:
+                        return self.send(409, {"error": "Server must be stopped"})
+                    backup = payload.get("backup", "")
+                    if not isinstance(backup, str) or not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9]+\.tar\.gz", backup):
+                        return self.send(400, {"error": "Invalid backup name"})
+                    run(["gh", "workflow", "run", WORKFLOW, "-R", REPO,
+                         "-f", "restore_backup=" + backup])
+                    return self.send(200, {"ok": True, "message": "Restoration dispatched: " + backup})
                 if path.path == "/api/stop":
                     response = control("command", "stop")
                     return self.send(200, response)

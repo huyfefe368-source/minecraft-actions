@@ -43,5 +43,5 @@ Visit http://127.0.0.1:8766 ; username admin. Password is stored at /etc/minecra
 - Runner 14 GB temporary SSD bounds maximum active world size even with 5 TB Drive. Snapshots need extra temporary space.
 - Stop sends in-game stop, allowing final snapshot. Do not cancel workflow unless necessary.
 - Drive edits do not apply to a running world; panel refuses edits while run active.
-- Manual recovery currently requires extracting selected backup to live while stopped. Automatic restore UX not implemented.
+- Backup list in panel supports selecting a dated archive and dispatching a restore workflow while stopped; the runner extracts it before starting Paper.
 - No runtime world data goes into Git; old repository-storage test retired.

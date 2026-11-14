@@ -10,7 +10,15 @@ mkdir -p "$HOME/.config/rclone" server "$RUNNER_TEMP/mc-snapshot" "$HOME/.ssh"
 printf '%s' "$RCLONE_CONFIG_B64" | base64 -d > "$HOME/.config/rclone/rclone.conf"
 chmod 600 "$HOME/.config/rclone/rclone.conf"
 rclone lsd "$DRIVE_BASE" >/dev/null
-if rclone lsf "$DRIVE_BASE/live" >/dev/null 2>&1; then
+if [[ -n "${RESTORE_BACKUP:-}" ]]; then
+  [[ "$RESTORE_BACKUP" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+\.tar\.gz$ ]] || { echo 'Invalid backup name'; exit 1; }
+  rclone copyto "$DRIVE_BASE/backups/$RESTORE_BACKUP" "$RUNNER_TEMP/restore.tar.gz"
+  if tar -tzf "$RUNNER_TEMP/restore.tar.gz" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
+    echo 'Unsafe backup archive'; exit 1
+  fi
+  tar -xzf "$RUNNER_TEMP/restore.tar.gz" -C server --no-same-owner --no-same-permissions
+  echo "RESTORED_BACKUP=$RESTORE_BACKUP"
+elif rclone lsf "$DRIVE_BASE/live" >/dev/null 2>&1; then
   rclone sync "$DRIVE_BASE/live" server --transfers 4 --checkers 8
   echo DRIVE_RESTORE_OK
 else

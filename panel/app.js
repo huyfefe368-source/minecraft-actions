@@ -107,7 +107,14 @@ async function backups() {
   try {
     const data = await api('/api/backup');
     const files = (data.files || []).sort((a,b) => b.Name.localeCompare(a.Name)).slice(0,15);
-    listLines('backups', files.length ? files.map(f => ({text:'◷ ' + f.Name,detail:Math.round((f.Size || 0)/1048576)+' MB'})) : [{text:'Chưa có snapshot'}]);
+    listLines('backups', files.length ? files.map(f => ({
+      text:'↺ ' + f.Name, detail:Math.round((f.Size || 0)/1048576)+' MB',
+      onclick: () => {
+        if (confirm('Khôi phục backup '+f.Name+' và khởi động lại server? Chỉ thực hiện khi server đã tắt.')) {
+          doAction('/api/restore',{backup:f.Name});
+        }
+      }
+    })) : [{text:'Chưa có snapshot'}]);
   } catch (e) { listLines('backups', [{text:e.message}]); }
 }
 el('startBtn').onclick = () => doAction('/api/start');
@@ -125,3 +132,10 @@ el('deleteFile').onclick = () => {if(confirm('XÓA file '+editing+' khỏi Drive
 el('closeFile').onclick = () => {el('editor').hidden = true;editing = '';};
 status();
 setInterval(status, 15000);
+
+el('createFile').onclick = () => {
+  const path = el('newFilePath').value.trim();
+  if (path && confirm('Tạo hoặc ghi đè file văn bản '+path+' trên Drive?')) {
+    doAction('/api/savefile',{path,content:''});
+  }
+};
