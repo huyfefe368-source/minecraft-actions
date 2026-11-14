@@ -99,10 +99,12 @@ def test_final_backup_error_reports_failure(tmp_path):
     with pytest.raises(SnapshotError):
         backup_world(server,d,tmp_path/'cache',run_id=1,stamp='20261114T100003Z',free_bytes=50*1024**3)
 
-def test_empty_live_does_not_overwrite_last_backup(tmp_path):
+def test_backup_without_checkpoint_refuses_new_world(tmp_path):
     d=FakeDrive();d.data['backups/old.tar.gz']=b'old'
-    assert restore_world(tmp_path/'server',d,tmp_path/'recover')=='new'
+    with pytest.raises(SnapshotError, match="without checkpoint"):
+        restore_world(tmp_path/'server',d,tmp_path/'recover')
     assert d.data['backups/old.tar.gz']==b'old'
+
 
 def test_no_second_writer(tmp_path):
     import yaml
@@ -142,3 +144,44 @@ def test_drive_outage_cannot_be_treated_as_new_world(monkeypatch):
     monkeypatch.setattr(store,'_exec',outage)
     with pytest.raises(SnapshotError):
         store.read('metadata/current.json')
+
+
+def test_drive_missing_metadata_only_after_confirmed_folder_listing(monkeypatch):
+    from scripts.world_store import RcloneStore
+    store=RcloneStore()
+    def execute(args, **kwargs):
+        if args[0] == "cat":
+            raise SnapshotError("cat unavailable")
+        if args[0] == "lsf" and args[1].endswith("Minecraft-Hosting/"):
+            return b"live/\nbackups/\nmetadata/\n"
+        if args[0] == "lsf" and args[1].endswith("/metadata"):
+            return b"other.json\n"
+        raise AssertionError(args)
+    monkeypatch.setattr(store, "_exec", execute)
+    assert store.read("metadata/current.json") is None
+
+
+def test_drive_existing_metadata_read_failure_blocks_new_world(monkeypatch):
+    from scripts.world_store import RcloneStore
+    store=RcloneStore()
+    def execute(args, **kwargs):
+        if args[0] == "cat":
+            raise SnapshotError("Drive read failed")
+        if args[0] == "lsf" and args[1].endswith("Minecraft-Hosting/"):
+            return b"metadata/\nlive/\nbackups/\n"
+        if args[0] == "lsf" and args[1].endswith("/metadata"):
+            return b"current.json\n"
+        raise AssertionError(args)
+    monkeypatch.setattr(store, "_exec", execute)
+    with pytest.raises(SnapshotError, match="existing Drive object"):
+        store.read("metadata/current.json")
+
+
+def test_new_world_requires_no_existing_files(tmp_path):
+    drive=FakeDrive()
+    target=tmp_path/'server'
+    target.mkdir()
+    (target/'world.dat').write_bytes(b'not empty')
+    with pytest.raises(SnapshotError, match="not empty"):
+        restore_world(target,drive,tmp_path/'recover')
+    assert (target/'world.dat').read_bytes()==b'not empty'

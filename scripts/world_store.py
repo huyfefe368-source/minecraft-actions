@@ -118,8 +118,15 @@ def restore_world(target: Path, store, tmp: Path, backup: str | None = None)->st
     if backup is None:
         current=store.read("metadata/current.json")
         if current is None:
-            if store.list_files("live"):
-                raise SnapshotError("Unverified live data exists; refusing overwrite")
+            # Never make a fresh world when an earlier backup exists but the
+            # current checkpoint is missing (for example after partial writes).
+            if store.list_files("live") or store.list_files("backups"):
+                raise SnapshotError(
+                    "Existing world/backup data without checkpoint; "
+                    "refusing to create a new world"
+                )
+            if target.exists() and any(target.iterdir()):
+                raise SnapshotError("Restore target is not empty")
             target.mkdir(parents=True,exist_ok=True)
             return "new"
         try: backup=json.loads(current)["backup_name"]
@@ -176,14 +183,20 @@ class RcloneStore:
         try:
             return self._exec(["cat",self._r(key)],timeout=60)
         except SnapshotError:
-            # Cat failed. Differentiate absent metadata from a Drive outage.
+            # A failed cat is not proof of a missing object: first confirm the
+            # remote root and the containing folder can still be enumerated.
             try:
-                folder,filename=key.rsplit('/',1)
-                listing=self.list_files(folder)
-            except (SnapshotError,ValueError):
-                return None if key=="metadata/current.json" and not self.list_files("live") else None
-            if filename not in listing:return None
-            raise SnapshotError("Could not read known Drive object")
+                folder, filename = key.rsplit("/", 1)
+            except ValueError as exc:
+                raise SnapshotError("Invalid Drive object key") from exc
+            root_listing = self.list_files("")
+            top_folder = folder.split("/", 1)[0] + "/"
+            if top_folder not in root_listing:
+                return None
+            listing = self.list_files(folder)
+            if filename in listing:
+                raise SnapshotError("Failed to read an existing Drive object")
+            return None
     def hash_remote(self,key):
         try:
             proc=subprocess.Popen(["rclone","cat",self._r(key)],

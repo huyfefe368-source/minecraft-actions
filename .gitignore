@@ -1,0 +1,26 @@
+# GitHub contains runner code, not live Minecraft state.
+server/
+minecraft-data/
+world/
+world_nether/
+world_the_end/
+plugins/
+logs/
+backups/
+*.jar
+*.tar
+*.tar.gz
+*.zip
+
+# Authentication materials, regardless of location.
+rclone.conf
+*.pem
+*.key
+.env
+.env.*
+!*.env.example
+
+# Python / tests
+__pycache__/
+*.py[cod]
+.pytest_cache/
