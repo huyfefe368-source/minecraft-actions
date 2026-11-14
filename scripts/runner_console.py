@@ -39,6 +39,11 @@ async def handle(reader, writer, fifo, logfile, paper_pid):
         elif req.get("op") == "logs":
             log = logfile.read_bytes()[-18000:].decode("utf-8", "replace") if logfile.exists() else ""
             response = {"ok": True, "logs": log}
+        elif req.get("op") == "restart":
+            Path(os.environ["RUNNER_TEMP"]).joinpath("mc-restart-requested").touch()
+            with fifo.open("w") as f:
+                f.write("stop\n")
+            response = {"ok": True}
         elif req.get("op") == "command":
             cmd = req.get("command")
             if not isinstance(cmd, str) or not 1 <= len(cmd) <= 150 or any(c in cmd for c in "\r\n\0"):

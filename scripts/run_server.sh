@@ -10,9 +10,15 @@ mkdir -p "$HOME/.config/rclone" server "$RUNNER_TEMP/mc-snapshot" "$HOME/.ssh"
 printf '%s' "$RCLONE_CONFIG_B64" | base64 -d > "$HOME/.config/rclone/rclone.conf"
 chmod 600 "$HOME/.config/rclone/rclone.conf"
 rclone lsd "$DRIVE_BASE" >/dev/null
+python3 scripts/desired_state.py check --drive "$DRIVE_BASE" || {
+  echo 'SERVER_STOPPED_BY_OWNER'; exit 0;
+}
 python3 scripts/world_store.py restore --server server --temp "$RUNNER_TEMP" \
   --drive "$DRIVE_BASE" --backup "${RESTORE_BACKUP:-}"
 
+python3 scripts/desired_state.py check --drive "$DRIVE_BASE" || {
+  echo 'OWNER_STOPPED_DURING_RESTORE'; exit 0;
+}
 AGENT="minecraft-hosting/1.0 (https://github.com/$GITHUB_REPOSITORY)"
 BUILDS="https://fill.papermc.io/v3/projects/paper/versions/26.3/builds"
 JSON=$(curl -fsSL --retry 3 -H "User-Agent: $AGENT" "$BUILDS")
@@ -50,6 +56,27 @@ PAPER_PID=''
 SSH_PID=''
 CONTROL_PID=''
 PAPER_STARTED=false
+ROLLOVER_READY=false
+dispatch_next() {
+  python3 scripts/desired_state.py check --drive "$DRIVE_BASE" || {
+    echo 'OWNER_STOPPED_NO_RESTART'; return 0;
+  }
+  [[ -n "$GH_TOKEN" && -n "$GITHUB_REPOSITORY" && -n "$WORKFLOW_REF" ]] || {
+    echo 'NO_GITHUB_WORKFLOW_TOKEN'; return 1;
+  }
+  for attempt in 1 2 3; do
+    python3 scripts/desired_state.py check --drive "$DRIVE_BASE" || {
+      echo 'OWNER_STOPPED_NO_RESTART'; return 0;
+    }
+    if gh workflow run minecraft-hosting.yml -R "$GITHUB_REPOSITORY" --ref "$WORKFLOW_REF"; then
+      echo 'SUCCESSOR_WORKFLOW_DISPATCHED'
+      return 0
+    fi
+    sleep 8
+  done
+  echo 'SUCCESSOR_WORKFLOW_DISPATCH_FAILED'
+  return 1
+}
 backup() {
   local kind="${1:-periodic}" snapshot_rc=0
   echo "DRIVE_BACKUP_START type=$kind at=$(date -u +%Y%m%dT%H%M%SZ)"
@@ -88,11 +115,20 @@ cleanup() {
   [[ -n "$SSH_PID" ]] && kill "$SSH_PID" 2>/dev/null
   exec 3>&-
   rm -f "$KEYFILE"
+  if [[ "$rc" -eq 0 && "$ROLLOVER_READY" == true &&
+        ! -f "$RUNNER_TEMP/mc-stop-requested" ]]; then
+    dispatch_next || rc=1
+  else
+    echo 'NO_AUTOMATIC_NEXT_JOB'
+  fi
   exit "$rc"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+python3 scripts/desired_state.py check --drive "$DRIVE_BASE" || {
+  echo 'OWNER_STOPPED_BEFORE_START'; exit 0;
+}
 
 (
   cd server
@@ -123,16 +159,33 @@ done
 echo "MINECRAFT_READY address=$VPS_HOST:25565 heap=12G"
 deadline=$((SECONDS + 18000))
 next_backup=$((SECONDS + 900))
+next_state_check=$((SECONDS + 30))
 while (( SECONDS < deadline )); do
   sleep 5
   if ! kill -0 "$PAPER_PID"; then
-    [[ -f "$RUNNER_TEMP/mc-stop-requested" ]] && break
+    if [[ -f "$RUNNER_TEMP/mc-restart-requested" ]]; then
+      ROLLOVER_READY=true
+      echo 'CONTROLLED_RESTART_REQUESTED'
+      break
+    fi
+    [[ -f "$RUNNER_TEMP/mc-stop-requested" ]] && {
+      echo 'MANUAL_STOP_REQUESTED'; break;
+    }
     echo 'Paper stopped unexpectedly'; exit 1
   fi
   kill -0 "$SSH_PID" || { echo 'Tunnel disconnected'; exit 1; }
+  if (( SECONDS >= next_state_check )); then
+    python3 scripts/desired_state.py check --drive "$DRIVE_BASE" || {
+      echo 'OWNER_REQUESTED_STOP'
+      touch "$RUNNER_TEMP/mc-stop-requested"
+      break
+    }
+    next_state_check=$((SECONDS + 30))
+  fi
   if (( SECONDS >= next_backup )); then
     backup periodic || echo "PERIODIC_BACKUP_FAILED; retry on next interval"
     next_backup=$((SECONDS + 900))
   fi
 done
+ROLLOVER_READY=true
 echo 'Session complete; graceful shutdown and final Drive snapshot.'
