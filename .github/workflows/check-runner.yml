@@ -1,0 +1,42 @@
+
+name: 01 - Check Runner Hardware
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-hardware:
+    name: Check Ubuntu Resources
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check system
+        shell: bash
+        run: |
+          echo "========== OS =========="
+          uname -a
+
+          echo "========== CPU =========="
+          nproc
+          lscpu | grep -E \
+            'Architecture|Model name|CPU\(s\)'
+
+          echo "========== RAM =========="
+          free -h
+
+          echo "========== DISK =========="
+          df -h /
+
+          echo "========== JAVA =========="
+          java -version
+
+          echo "========== NETWORK =========="
+          curl -fsS --max-time 10 \
+            https://api.ipify.org
+          echo
+
+          echo "========== FINISHED =========="
