@@ -26,15 +26,18 @@ def launch(config_file: Path, root: Path):
     resource = root.joinpath(startup_file(profile)).resolve(strict=False)
     if not resource.is_relative_to(root) or not resource.is_file():
         raise ValueError("STARTUP_FILE_MISSING: upload "+startup_file(profile)+" to Drive/live")
+    env_name="JAVA_HOME_"+profile["java_version"]+"_X64"
+    home=os.environ.get(env_name)
+    if not home:
+        raise ValueError("JAVA_VERSION_UNAVAILABLE: "+env_name)
+    java=Path(home)/"bin/java"
+    if not java.is_file():
+        raise ValueError("JAVA_BINARY_MISSING")
+    # Forge/NeoForge run.sh launchers also inherit the chosen Java version.
+    os.environ["JAVA_HOME"]=str(Path(home))
+    os.environ["PATH"]=str(Path(home)/"bin")+os.pathsep+os.environ.get("PATH","")
     if args[0]=="java":
-        env_name="JAVA_HOME_"+profile["java_version"]+"_X64"
-        home=os.environ.get(env_name)
-        if not home:
-            raise ValueError("JAVA_VERSION_UNAVAILABLE: "+env_name)
-        binary=Path(home)/"bin/java"
-        if not binary.is_file():
-            raise ValueError("JAVA_BINARY_MISSING")
-        args[0]=str(binary)
+        args[0]=str(java)
     else:
         binary=shutil.which(args[0])
         if not binary:

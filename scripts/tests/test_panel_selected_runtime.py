@@ -21,9 +21,14 @@ def test_sh_launcher_is_executable_without_java_or_shell_eval(tmp_path):
     (server/"run.sh").write_text("#!/bin/sh\nprintf 'server launched with %s\\n' \"$*\"\n")
     config=tmp_path/"startup.json"
     config.write_text(json.dumps({"java_version":"17","command":"sh run.sh nogui","software":"Forge"}))
+    fake_java=tmp_path/"jdk17"/"bin"/"java"
+    fake_java.parent.mkdir(parents=True)
+    fake_java.write_text("#!/bin/sh\nexit 0\n")
+    fake_java.chmod(0o755)
+    env={**os.environ,"JAVA_HOME_17_X64":str(fake_java.parent.parent)}
     proc=subprocess.run([sys.executable,str(ROOT/"scripts/startup.py"),
                          "launch","--config",str(config),"--root",str(server)],
-                        capture_output=True,text=True,timeout=8)
+                        capture_output=True,text=True,timeout=8,env=env)
     assert proc.returncode==0,proc.stderr
     assert "server launched with nogui" in proc.stdout
 
