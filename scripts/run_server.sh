@@ -119,7 +119,7 @@ trap 'exit 143' TERM
 ) &
 PAPER_PID=$!
 PAPER_STARTED=true
-python3 scripts/runner_console.py --fifo server/console.fifo --log server/server.log &
+python3 scripts/runner_console.py --fifo server/console.fifo --log server/server.log --paper-pid "$PAPER_PID" &
 CONTROL_PID=$!
 ssh -NT -i "$KEYFILE" -o BatchMode=yes -o IdentitiesOnly=yes \
   -o PasswordAuthentication=no -o ExitOnForwardFailure=yes \
