@@ -1,0 +1,118 @@
+
+name: 02 - Test Minecraft Paper
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  paper-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+
+    steps:
+      - name: Verify EULA
+        env:
+          EULA: ${{ vars.ACCEPT_MINECRAFT_EULA }}
+        run: |
+          if [[ "$EULA" != "TRUE" ]]; then
+            echo "Accept Minecraft EULA first."
+            exit 1
+          fi
+
+      - name: Install Java 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Download Paper 26.3
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          AGENT="mc-paper-test/1.0 (https://github.com/${GITHUB_REPOSITORY})"
+          API="https://fill.papermc.io/v3/projects/paper/versions/26.3/builds"
+
+          JSON=$(curl -fsSL --retry 3 \
+            -H "User-Agent: $AGENT" "$API")
+
+          URL=$(jq -er \
+            '[.[] | select(.channel == "STABLE")][0].downloads."server:default".url' \
+            <<< "$JSON")
+
+          SHA=$(jq -er \
+            '[.[] | select(.channel == "STABLE")][0].downloads."server:default".checksums.sha256' \
+            <<< "$JSON")
+
+          mkdir -p server
+
+          curl -fLsS --retry 3 \
+            -H "User-Agent: $AGENT" \
+            -o server/paper.jar "$URL"
+
+          echo "$SHA  server/paper.jar" | sha256sum -c -
+
+          echo "Paper downloaded successfully."
+
+      - name: Configure Test Server
+        shell: bash
+        run: |
+          echo "eula=true" > server/eula.txt
+
+          cat > server/server.properties <<'EOF'
+          server-ip=127.0.0.1
+          server-port=25565
+          online-mode=true
+          max-players=5
+          view-distance=6
+          simulation-distance=4
+          motd=GitHub Actions Paper Test
+          EOF
+
+      - name: Start And Verify Paper
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd server
+
+          java -Xms1G -Xmx6G \
+            -jar paper.jar --nogui \
+            > server.log 2>&1 &
+
+          PAPER_PID=$!
+
+          cleanup() {
+            kill -TERM "$PAPER_PID" 2>/dev/null || true
+            wait "$PAPER_PID" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          for i in $(seq 1 180); do
+            if grep -Fq "Done (" server.log; then
+              echo "PAPER_BOOT_OK"
+              if ss -lnt | grep -q ':25565'; then
+                echo "PORT_25565_OK"
+              else
+                echo "PORT_25565_FAILED"
+                exit 1
+              fi
+
+              tail -n 25 server.log
+              exit 0
+            fi
+
+            if ! kill -0 "$PAPER_PID" 2>/dev/null; then
+              echo "Paper exited unexpectedly."
+              tail -n 100 server.log
+              exit 1
+            fi
+
+            sleep 2
+          done
+
+          echo "Paper startup timeout."
+          tail -n 100 server.log
+          exit 1
