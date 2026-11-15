@@ -103,8 +103,8 @@ def backup_world(server: Path, store, tmp: Path, run_id: int, stamp: str | None 
         manifest_json=json.dumps(manifest,sort_keys=True).encode()
         store.put("backups/"+name+".json",manifest_json)
         store.put("metadata/live-state.json",b'{"state":"updating"}')
-        store.sync(snapshot,"live")
-        store.check(snapshot,"live")
+        store.sync(snapshot,"server")
+        store.check(snapshot,"server")
         store.put("metadata/live-state.json",b'{"state":"ready"}')
         # World checkpoint remains versioned, independent of live folder edits.
         store.put("metadata/current.json",manifest_json)
@@ -121,8 +121,8 @@ def mirror_live(server: Path, store) -> dict:
     source = Path(server)
     source_size(source)
     store.put("metadata/live-state.json",b'{"state":"updating"}')
-    store.sync(source, "live")
-    store.check(source, "live")
+    store.sync(source, "server")
+    store.check(source, "server")
     store.put("metadata/live-state.json",b'{"state":"ready"}')
     marker = {
         "synced_at": datetime.now(timezone.utc).isoformat(),
@@ -143,7 +143,7 @@ def restore_world(target: Path, store, tmp: Path, backup: str | None = None)->st
         if current is None:
             # Never make a fresh world when an earlier backup exists but the
             # current checkpoint is missing (for example after partial writes).
-            if store.list_files("live") or store.list_files("backups"):
+            if store.list_files("server") or store.list_files("backups"):
                 raise SnapshotError(
                     "Existing world/backup data without checkpoint; "
                     "refusing to create a new world"
@@ -180,7 +180,7 @@ def restore_world(target: Path, store, tmp: Path, backup: str | None = None)->st
     return "restored"
 
 def restore_server(target: Path, store, tmp: Path, backup: str | None = None) -> str:
-    """Offline edits in Drive/live are the next server contents.
+    """Offline edits in Drive/server are the next server contents.
 
     An explicitly selected archive is restored instead. An interrupted live
     mirror is never trusted; fall back to an existing verified checkpoint.
@@ -190,7 +190,7 @@ def restore_server(target: Path, store, tmp: Path, backup: str | None = None) ->
     target=Path(target)
     if target.exists() and any(target.iterdir()):
         raise SnapshotError("Restore target is not empty")
-    live=store.list_files("live")
+    live=store.list_files("server")
     if live:
         marker=store.read("metadata/live-state.json")
         if marker is not None:
@@ -205,7 +205,7 @@ def restore_server(target: Path, store, tmp: Path, backup: str | None = None) ->
         target.mkdir(parents=True,exist_ok=True)
         store.download_live(target)
         store.check_live(target)
-        return "live"
+        return "server"
     if store.list_files("backups"):
         return restore_world(target,store,tmp)
     target.mkdir(parents=True,exist_ok=True)
@@ -237,9 +237,9 @@ class RcloneStore:
     def list_files(self,key):
         return self._exec(["lsf",self._r(key)],timeout=60).decode().splitlines()
     def download_live(self,target):
-        self._exec(["copy",self._r("live"),str(target),"--transfers","4"],timeout=1800)
+        self._exec(["copy",self._r("server"),str(target),"--transfers","4"],timeout=1800)
     def check_live(self,target):
-        self._exec(["check",self._r("live"),str(target),"--one-way"],timeout=1800)
+        self._exec(["check",self._r("server"),str(target),"--one-way"],timeout=1800)
     def read(self,key):
         try:
             return self._exec(["cat",self._r(key)],timeout=60)

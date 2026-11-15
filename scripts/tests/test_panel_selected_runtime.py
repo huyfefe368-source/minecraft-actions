@@ -59,7 +59,7 @@ class DriveLive:
         self.state=state
         self.downloads=0
     def list_files(self,key):
-        return ["server.jar","plugins/"] if key=="live" else []
+        return ["server.jar","plugins/"] if key=="server" else []
     def read(self,key):
         return self.state if key=="metadata/live-state.json" else None
     def download_live(self,target):
@@ -73,13 +73,13 @@ class DriveLive:
 def test_offline_drive_files_are_authoritative_for_next_start(tmp_path):
     store=DriveLive()
     server=tmp_path/"server"
-    assert world_store.restore_server(server,store,tmp_path/"cache")=="live"
+    assert world_store.restore_server(server,store,tmp_path/"cache")=="server"
     assert store.downloads==1
     assert (server/"plugins"/"config.yml").read_bytes()==b"configured"
 
 def test_good_live_marker_is_accepted(tmp_path):
     store=DriveLive(b'{"state":"ready"}')
-    assert world_store.restore_server(tmp_path/"server",store,tmp_path/"cache")=="live"
+    assert world_store.restore_server(tmp_path/"server",store,tmp_path/"cache")=="server"
 
 def test_partial_drive_mirror_does_not_boot_world(tmp_path,monkeypatch):
     store=DriveLive(b'{"state":"updating"}')

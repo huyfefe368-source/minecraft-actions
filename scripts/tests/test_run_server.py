@@ -88,7 +88,7 @@ def test_live_not_promoted_before_backup_verified(tmp_path):
     backup_world(server,d,tmp_path/'cache',run_id=1,stamp='20261114T100002Z',free_bytes=50*1024**3)
     actions=d.actions
     hash_index=next(i for i,a in enumerate(actions) if a[0]=='hash_remote')
-    live_index=next(i for i,a in enumerate(actions) if a==('sync','live'))
+    live_index=next(i for i,a in enumerate(actions) if a==('sync','server'))
     marker_index=next(i for i,a in enumerate(actions) if a==('put','metadata/current.json'))
     assert hash_index < live_index < marker_index
 
@@ -153,7 +153,7 @@ def test_drive_missing_metadata_only_after_confirmed_folder_listing(monkeypatch)
         if args[0] == "cat":
             raise SnapshotError("cat unavailable")
         if args[0] == "lsf" and args[1].endswith("Minecraft-Hosting/"):
-            return b"live/\nbackups/\nmetadata/\n"
+            return b"server/\nbackups/\nmetadata/\n"
         if args[0] == "lsf" and args[1].endswith("/metadata"):
             return b"other.json\n"
         raise AssertionError(args)
@@ -211,8 +211,8 @@ def test_incremental_raw_mirror_does_not_change_recovery_checkpoint(tmp_path):
     drive.data['metadata/current.json']=b'untouched'
     result=mirror_live(source,drive)
     assert result['mode']=='verified-raw-files'
-    assert ('sync','live') in drive.actions
-    assert ('check','live') in drive.actions
+    assert ('sync','server') in drive.actions
+    assert ('check','server') in drive.actions
     assert drive.data['metadata/current.json']==b'untouched'
     assert 'metadata/live-last-sync.json' in drive.data
 
