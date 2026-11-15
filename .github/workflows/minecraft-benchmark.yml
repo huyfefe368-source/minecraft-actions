@@ -1,0 +1,140 @@
+name: Minecraft Hardware Benchmark (Kaggle comparison)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    name: Benchmark CPU, RAM and Disk
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Measure runner hardware using Kaggle benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import sys
+          import time
+          import shutil
+          import json
+          import subprocess
+          import concurrent.futures
+
+          print("===== GITHUB ACTIONS MINECRAFT BENCHMARK =====", flush=True)
+
+          cpu_model = "Unknown"
+          with open("/proc/cpuinfo") as f:
+              for line in f:
+                  if line.startswith("model name"):
+                      cpu_model = line.split(":", 1)[1].strip()
+                      break
+          cores = len(os.sched_getaffinity(0))
+          print("\n[CPU]")
+          print("Model:", cpu_model)
+          print("vCPU:", cores)
+
+          ram_info = {}
+          with open("/proc/meminfo") as f:
+              for line in f:
+                  parts = line.split()
+                  ram_info[parts[0].rstrip(":")] = int(parts[1])
+          print("\n[RAM]")
+          print("Total:", round(ram_info["MemTotal"] / 1048576, 2), "GB")
+          print("Available:", round(ram_info["MemAvailable"] / 1048576, 2), "GB")
+
+          folder = os.environ.get("RUNNER_TEMP", "/tmp")
+          disk = shutil.disk_usage(folder)
+          print("\n[DISK]")
+          print("Total:", round(disk.total / 1024**3, 2), "GB")
+          print("Free:", round(disk.free / 1024**3, 2), "GB")
+
+          worker_code = """
+          result = 0
+          for i in range(6000000):
+              result += (i * i) % 1000003
+          print(result)
+          """
+          def run_worker():
+              subprocess.run(
+                  [sys.executable, "-c", worker_code],
+                  stdout=subprocess.DEVNULL,
+                  check=True,
+              )
+
+          print("\n[BENCHMARK CPU]")
+          start = time.perf_counter()
+          run_worker()
+          single = time.perf_counter() - start
+
+          workers = min(cores, 4)
+          start = time.perf_counter()
+          with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+              list(pool.map(lambda _: run_worker(), range(workers)))
+          multi = time.perf_counter() - start
+          print("Single-core:", round(single, 3), "seconds")
+          print(f"{workers}-core:", round(multi, 3), "seconds")
+          print("Parallel speedup:", round(workers * single / multi, 2), "x")
+          print("Single-core throughput:", round(6 / single, 2), "million loops/s")
+
+          print("\n[BENCHMARK DISK]")
+          path = os.path.join(folder, "minecraft-benchmark-" + str(os.getpid()) + ".bin")
+          block = os.urandom(1024 * 1024)
+          try:
+              start = time.perf_counter()
+              with open(path, "wb") as f:
+                  for _ in range(64):
+                      f.write(block)
+                  f.flush()
+                  os.fsync(f.fileno())
+              write_time = time.perf_counter() - start
+
+              start = time.perf_counter()
+              with open(path, "rb") as f:
+                  while f.read(4 * 1024 * 1024):
+                      pass
+              read_time = time.perf_counter() - start
+
+              print("Write:", round(64 / write_time, 2), "MB/s")
+              print("Read (cached):", round(64 / read_time, 2), "MB/s")
+          finally:
+              if os.path.exists(path):
+                  os.remove(path)
+
+          result = {
+              "cpu_model": cpu_model,
+              "vcpu": cores,
+              "ram_gb": round(ram_info["MemTotal"] / 1048576, 2),
+              "ram_available_gb": round(ram_info["MemAvailable"] / 1048576, 2),
+              "disk_gb": round(disk.total / 1024**3, 2),
+              "disk_free_gb": round(disk.free / 1024**3, 2),
+              "single_core_seconds": round(single, 3),
+              "parallel_workers": workers,
+              "parallel_seconds": round(multi, 3),
+              "parallel_speedup": round(workers * single / multi, 2),
+              "single_million_loops_per_second": round(6 / single, 2),
+              "disk_write_mb_s": round(64 / write_time, 2),
+              "disk_read_cached_mb_s": round(64 / read_time, 2),
+          }
+          print("\nBENCHMARK_JSON=" + json.dumps(result, separators=(",", ":")), flush=True)
+          print("===== TEST COMPLETE =====", flush=True)
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a") as f:
+                  f.write("# GitHub Actions vs Kaggle\n\n")
+                  f.write("| Metric | GitHub Actions | Kaggle measured |\n")
+                  f.write("|---|---:|---:|\n")
+                  f.write(f"| vCPU | {cores} | 4 |\n")
+                  f.write(f"| RAM (GiB) | {result['ram_gb']} | 31.35 |\n")
+                  f.write(f"| Disk (GiB) | {result['disk_gb']} | 19.52 |\n")
+                  f.write(f"| Single-core 6M loops (s, lower better) | {result['single_core_seconds']} | 1.731 |\n")
+                  f.write(f"| {workers}-process benchmark (s) | {result['parallel_seconds']} | 3.434 (4 processes) |\n")
+                  f.write(f"| Disk write 64 MB (MB/s) | {result['disk_write_mb_s']} | 257.17 |\n")
+                  f.write(f"| Disk read, cached (MB/s) | {result['disk_read_cached_mb_s']} | 4471.45 |\n\n")
+                  f.write("Synthetic, non-Minecraft benchmark. CPU sharing and file caches affect results.\n")
+          PY
