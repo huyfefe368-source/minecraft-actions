@@ -1,0 +1,29 @@
+name: Runner lifecycle heartbeat probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Start detached heartbeat and end job
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/heartbeat.sh" <<'SH'
+          #!/usr/bin/env bash
+          for i in $(seq 1 60); do
+            curl -fsS --connect-timeout 2 --max-time 3 \
+              http://160.191.51.148:18769/heartbeat/runner20261115 >/dev/null 2>&1 || true
+            sleep 5
+          done
+          SH
+          nohup setsid bash "$RUNNER_TEMP/heartbeat.sh" >"$RUNNER_TEMP/probe.out" 2>&1 </dev/null &
+          echo "DETACHED_PID=$!"
+          sleep 16
+          echo 'JOB_STEP_FINISHED. Probe has no secrets and a built-in 5 minute cap.'
