@@ -29,4 +29,16 @@ class ServerControls(unittest.TestCase):
    self.assertFalse(m.handle_server_action('stop'));self.assertFalse(m.server_desired)
    self.assertFalse(m.stop_requested.is_set())
 
+ def test_prepare_preserves_synced_properties(self):
+  spec=importlib.util.spec_from_file_location('runner','scripts/temp-purpur-runner.py');m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+  with tempfile.TemporaryDirectory() as d:
+   m.SERVER=Path(d)
+   (m.SERVER/'server.jar').write_bytes(b'existing jar')
+   (m.SERVER/'eula.txt').write_text('eula=true')
+   original='server-port=25580\nonline-mode=false\nmotd=Edited in repo\n'
+   (m.SERVER/'server.properties').write_text(original)
+   with patch.object(m,'run'):m.prepare()
+   self.assertEqual((m.SERVER/'server.properties').read_text(),original)
+   self.assertEqual(m.minecraft_port(),25580)
+
 if __name__=='__main__':unittest.main()

@@ -16,6 +16,7 @@ KEY=BASE/"ssh_key"
 KNOWN=BASE/"known_hosts"
 mc=None
 tunnel=None
+forwarded_port=None
 stop_requested=threading.Event()
 checkpoint_lock=threading.Lock()
 last_snapshot=None
@@ -116,11 +117,8 @@ def prepare():
              "https://api.purpurmc.org/v2/purpur/1.21.11/2568/download"],seconds=180)
         run(["unzip","-tqq",str(jar)],seconds=40)
     properties=SERVER/"server.properties"
-    lines=properties.read_text().splitlines() if properties.exists() else []
-    override={"server-ip":"127.0.0.1","server-port":"25565","online-mode":"true",
-              "enable-rcon":"false","enable-query":"false"}
-    lines=[l for l in lines if not any(l.startswith(k+"=") for k in override)]
-    properties.write_text("\n".join(lines+[k+"="+v for k,v in override.items()])+"\n")
+    if not properties.exists():
+        properties.write_text('server-ip=127.0.0.1\nserver-port=25565\nonline-mode=true\nenable-rcon=false\nenable-query=false\n')
     if "eula=true" not in (SERVER/"eula.txt").read_text().lower():
         raise RuntimeError("Minecraft EULA missing; must be accepted in initial server state")
     note("Java version:")
@@ -138,10 +136,20 @@ def startup_ready(log,offset):
         stream.seek(offset);message=stream.read().decode(errors="replace")
     return bool(re.search(r"Done \([0-9.]+s\)!",message))
 
+def minecraft_port():
+    port=25565
+    properties=SERVER/'server.properties'
+    if properties.exists():
+        for line in properties.read_text().splitlines():
+            if line.startswith('server-port='):port=int(line.split('=',1)[1])
+    if not 1<=port<=65535:raise ValueError('Invalid Minecraft port')
+    return port
+
 def open_tunnel():
-    global tunnel
+    global tunnel,forwarded_port
+    forwarded_port=minecraft_port()
     tunnel=subprocess.Popen(["ssh",*opts(),"-N","-T","-o","ExitOnForwardFailure=yes",
-        "-R","127.0.0.1:25578:127.0.0.1:25565",
+        "-R","127.0.0.1:25578:127.0.0.1:"+str(forwarded_port),
         "-R","127.0.0.1:25579:127.0.0.1:25579",REMOTE],
         stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
     time.sleep(3)
@@ -152,6 +160,10 @@ def open_tunnel():
 def start():
     global mc,phase
     phase="starting"
+    if forwarded_port!=minecraft_port():
+        if tunnel is not None and tunnel.poll() is None:
+            tunnel.terminate();tunnel.wait(timeout=10)
+        open_tunnel()
     (SERVER/"logs").mkdir(exist_ok=True)
     log=SERVER/"logs"/"actions-console.log"
     log_offset=log.stat().st_size if log.exists() else 0
