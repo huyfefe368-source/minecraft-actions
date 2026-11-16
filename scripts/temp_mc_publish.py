@@ -61,6 +61,13 @@ def publish(lock_path='/run/lock/mc-tree-publish.lock'):
    if result['conflicts']:
     shutil.copytree(conflict_dir,REPO/'conflicts'/incoming.name,dirs_exist_ok=True)
    run(['rsync','-a','--checksum','--delete',str(work/'server')+'/',str(REPO/'server')+'/'])
+   # Files arrive with Minecraft's private modes; the SSH reader needs group access.
+   import grp,os
+   try:gid=grp.getgrnam('mcghplaytest').gr_gid
+   except KeyError:gid=None
+   if gid is not None:
+    for entry in [REPO/'server',*(REPO/'server').rglob('*')]:
+     os.chown(entry,-1,gid);os.chmod(entry,entry.stat().st_mode | (0o050 if entry.is_dir() else 0o040))
    verify(REPO/'server',result['files'])
    merged={**info,'files':result['files'],'conflicts':result['conflicts']}
    (REPO/'snapshot.json').write_text(json.dumps(merged,indent=2))
