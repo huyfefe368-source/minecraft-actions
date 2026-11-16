@@ -2,7 +2,7 @@
 """Temporary, manually triggered Minecraft dev playtest on GitHub Actions."""
 import hashlib, json, os, re, signal, socket, subprocess, sys, time, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from temp_mc_state import inventory
+from temp_mc_state import inventory,verify
 from temp_mc_merge import merge_trees
 from collections import deque
 from pathlib import Path
@@ -76,7 +76,7 @@ def ssh(cmd,seconds=150):
     return run(["ssh",*opts(),REMOTE,cmd],seconds=seconds,capture=True)
 
 def rsync(src,dst,follow=False,seconds=300):
-    arg=["rsync","-a","--no-owner","--no-group"]
+    arg=["rsync","-a","--checksum","--no-owner","--no-group"]
     if follow:arg.append("-L")
     if "/tree-incoming/" in str(dst) and str(dst).endswith("/server/"):
         arg.append("--copy-dest=/srv/mc-temp12111/tree-repo/server")
@@ -233,7 +233,7 @@ def checkpoint(final=False):
                 send("save-on")
                 raise RuntimeError("Minecraft did not acknowledge save-all flush")
         try:
-            run(["rsync","-a","--delete",str(SERVER)+"/",str(snap)+"/"],seconds=90)
+            run(["rsync","-a","--checksum","--delete",str(SERVER)+"/",str(snap)+"/"],seconds=90)
         finally:
             if live:send("save-on")
         # Track otherwise-empty folders in Git without archives.
@@ -266,13 +266,14 @@ def checkpoint(final=False):
                 sync_restart_pending=server_desired
                 shutdown()
             incoming=BASE/'inbound';incoming.mkdir(exist_ok=True)
-            run(['rsync','-a','--delete','-e','ssh '+ ' '.join(opts()),REMOTE+':/srv/mc-temp12111/tree-repo/server/',str(incoming)+'/'],seconds=120)
+            run(['rsync','-a','--checksum','--delete','-e','ssh '+ ' '.join(opts()),REMOTE+':/srv/mc-temp12111/tree-repo/server/',str(incoming)+'/'],seconds=120)
             target=BASE/'apply-tree'
             import shutil
             if target.exists():shutil.rmtree(target)
             evidence=BASE/'apply-conflicts'/ident
             result=merge_trees(files,SERVER,incoming,target,evidence)
-            run(['rsync','-a','--delete',str(target)+'/',str(SERVER)+'/'],seconds=60)
+            run(['rsync','-a','--checksum','--delete',str(target)+'/',str(SERVER)+'/'],seconds=60)
+            verify(SERVER,result['files'])
             if result['conflicts'] and evidence.exists():
                 shutil.copytree(evidence,SERVER/'.sync-conflicts'/ident,dirs_exist_ok=True)
         if not final:resume_minecraft()
@@ -358,7 +359,11 @@ def main():
         threading.Thread(target=http.serve_forever,daemon=True).start()
         open_tunnel()
         start();phase="running"
-        if not stop_requested.is_set():checkpoint()
+        if not stop_requested.is_set():
+            try:checkpoint()
+            except CheckpointInterrupted:raise
+            except Exception as error:
+                sync_state.update(state='error',error=str(error));note('INITIAL_SYNC_RETRY',str(error))
         until=time.monotonic()+minutes*60
         next_save=time.monotonic()+5
         while time.monotonic()<until and not stop_requested.wait(0.5):

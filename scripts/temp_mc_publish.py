@@ -27,7 +27,9 @@ def publish(lock_path='/run/lock/mc-tree-publish.lock'):
    except (ValueError,OSError,KeyError,TypeError) as error:
     rejected=BASE/'tree-rejected';rejected.mkdir(exist_ok=True)
     target=rejected/incoming.name;incoming.rename(target)
-    (target/'rejection.txt').write_text(str(error));print('SNAPSHOT_QUARANTINED',incoming.name,str(error),flush=True);continue
+    (target/'rejection.txt').write_text(str(error))
+    atomic_json(BASE/'tree-acks'/(incoming.name+'.json'),{'snapshot':incoming.name,'error':str(error)})
+    print('SNAPSHOT_QUARANTINED',incoming.name,str(error),flush=True);continue
    existing_ack=BASE/'tree-acks'/(incoming.name+'.json')
    if existing_ack.exists():
     shutil.rmtree(incoming);continue
@@ -58,7 +60,8 @@ def publish(lock_path='/run/lock/mc-tree-publish.lock'):
    if any(v['size']>=100*1024*1024 for v in result['files'].values()):raise ValueError('Merged tree contains a file >=100 MiB')
    if result['conflicts']:
     shutil.copytree(conflict_dir,REPO/'conflicts'/incoming.name,dirs_exist_ok=True)
-   run(['rsync','-a','--delete',str(work/'server')+'/',str(REPO/'server')+'/'])
+   run(['rsync','-a','--checksum','--delete',str(work/'server')+'/',str(REPO/'server')+'/'])
+   verify(REPO/'server',result['files'])
    merged={**info,'files':result['files'],'conflicts':result['conflicts']}
    (REPO/'snapshot.json').write_text(json.dumps(merged,indent=2))
    git('add','-f','--all','server','snapshot.json')
