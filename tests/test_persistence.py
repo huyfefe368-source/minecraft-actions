@@ -13,6 +13,19 @@ def load(name, path):
     return mod
 
 class PersistenceTests(unittest.TestCase):
+    def test_readiness_requires_done_from_current_boot(self):
+        import os
+        os.environ.setdefault('RUNNER_TEMP','/tmp')
+        m=load('runner','scripts/temp-purpur-runner.py')
+        with tempfile.TemporaryDirectory() as d:
+            log=Path(d)/'console.log'
+            log.write_text('[INFO]: Done (15.0s)! For help, type help\n')
+            offset=log.stat().st_size
+            with log.open('a') as f:f.write('Starting Minecraft server on 127.0.0.1:25565\n')
+            self.assertFalse(m.startup_ready(log,offset))
+            with log.open('a') as f:f.write('[INFO]: Done (16.071s)! For help, type help\n')
+            self.assertTrue(m.startup_ready(log,offset))
+
     def test_manifest_detects_partial_transfer_and_extra_files(self):
         m = load('state', 'scripts/temp_mc_state.py')
         with tempfile.TemporaryDirectory() as d:

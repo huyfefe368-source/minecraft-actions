@@ -92,6 +92,11 @@ def send(command):
             mc.stdin.flush()
         except (OSError,ValueError):pass
 
+def startup_ready(log,offset):
+    with log.open("rb") as stream:
+        stream.seek(offset);message=stream.read().decode(errors="replace")
+    return bool(re.search(r"Done \([0-9.]+s\)!",message))
+
 def start():
     global mc,tunnel
     tunnel=subprocess.Popen(["ssh",*opts(),"-N","-T","-o","ExitOnForwardFailure=yes",
@@ -104,6 +109,7 @@ def start():
                            tunnel.stderr.read().decode(errors="replace")[-450:])
     (SERVER/"logs").mkdir(exist_ok=True)
     log=SERVER/"logs"/"actions-console.log"
+    log_offset=log.stat().st_size if log.exists() else 0
     with log.open("a",encoding="utf8",buffering=1) as out:
         mc=subprocess.Popen(["java","-Xms2G","-Xmx12G","-XX:ActiveProcessorCount=4",
                              "-XX:+UseG1GC","-XX:+ParallelRefProcEnabled",
@@ -115,11 +121,15 @@ def start():
         if mc.poll() is not None:
             raise RuntimeError("Minecraft crashed: " +
                 "\n".join(log.read_text(errors="replace").splitlines()[-14:]))
-        try:
-            with socket.create_connection(("127.0.0.1",25565),timeout=1):
-                note("SERVER READY. Connect Minecraft Java 1.21.11 to",VPS+":25577")
-                return
-        except OSError:time.sleep(4)
+        if startup_ready(log,log_offset):
+            note("SERVER READY. Connect Minecraft Java 1.21.11 to",VPS+":25577")
+            return
+        if (BASE/"stop-requested").exists() or stop_requested.is_set():
+            stop_requested.set()
+            mc.terminate()
+            mc.wait(timeout=70)
+            return
+        time.sleep(1)
     raise RuntimeError("Minecraft did not start within 5 minutes")
 
 def shutdown():
@@ -219,7 +229,7 @@ def main():
     result=0
     try:
         start();phase="running"
-        checkpoint()
+        if not stop_requested.is_set():checkpoint()
         until=time.monotonic()+minutes*60
         next_save=time.monotonic()+60
         while time.monotonic()<until and not stop_requested.wait(1):
