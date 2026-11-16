@@ -19,13 +19,18 @@ def can_restart(state,runs,published,unchanged=False):
  return final_ready(state,published,unchanged)
 
 def main(action):
- if action not in ('status','start','stop','enable','disable','tick'):raise ValueError('Invalid action')
+ if action not in ('status','start','stop','enable','disable','tick','restart','mc_start','mc_restart','mc_stop'):raise ValueError('Invalid action')
  with open('/run/lock/mc-controller.lock','w') as lock:
   fcntl.flock(lock,fcntl.LOCK_EX)
   path=BASE/'controller.json'
   state=json.loads(path.read_text()) if path.exists() else {'enabled':False}
-  if action in ('stop','disable'):
-   state['enabled']=False
+  if action.startswith('mc_'):
+   request=Request('http://127.0.0.1:25579/',data=json.dumps({'op':'server-control','action':action[3:]}).encode(),headers={'Content-Type':'application/json'})
+   with urlopen(request,timeout=4) as response:response.read()
+   return {'ok':True,'message':'Minecraft '+action[3:]}
+  if action in ('stop','restart','disable'):
+   if action!='restart':state['enabled']=False
+   state['restart_pending']=action=='restart'
    state['message']='24/7 đã tắt; đang xử lý yêu cầu dừng' if action=='stop' else '24/7 đã tắt; phiên hiện tại tiếp tục chạy'
    tmp=path.with_suffix('.tmp');tmp.write_text(json.dumps(state));tmp.chmod(0o644);tmp.replace(path)
    if action=='disable':return state
@@ -41,13 +46,15 @@ def main(action):
   def dispatch():
    output=gh('workflow','run',WORKFLOW,'-R',REPO,'--ref','main','-f','duration_minutes=330')
    match=re.search(r'/runs/(\d+)',output)
+   state['restart_pending']=False
    state['dispatched_at']=time.time()
    if match:state['last_run']=int(match.group(1))
    state['message']='Đã yêu cầu bật job; đang chờ GitHub cấp máy'
-  if action=='stop':
-   state['enabled']=False;state['message']='Đang dừng và lưu; 24/7 đã tắt'
+  if action in ('stop','restart'):
+   if action=='stop':state['enabled']=False
+   state['message']='Restart job' if action=='restart' else 'Stop job'
    try:
-    with urlopen(Request('http://127.0.0.1:25579/',data=b'{"command":"stop"}',headers={'Content-Type':'application/json'}),timeout=4) as r:r.read()
+    with urlopen(Request('http://127.0.0.1:25579/',data=b'{"op":"job-stop"}',headers={'Content-Type':'application/json'}),timeout=4) as r:r.read()
    except OSError:
     for run in active:gh('run','cancel',str(run['databaseId']),'-R',REPO)
   elif action=='disable':state['enabled']=False;state['message']='24/7 đã tắt; phiên hiện tại tiếp tục chạy'
@@ -55,9 +62,10 @@ def main(action):
    if action=='enable':state['enabled']=True
    if not active and time.time()-state.get('dispatched_at',0)>=90:
     if final_ready(state,published,unchanged):dispatch()
-    else:state['message']='Đang chờ bản lưu cuối lên repo; chưa bật job mới'
+    else:state['restart_pending']=True
+    if state.get('restart_pending'):state['message']='Đang chờ lưu'
    else:state['message']='Job đang chạy hoặc đang khởi tạo'
-  elif action=='tick' and can_restart(state,runs,published,unchanged):dispatch()
+  elif action=='tick' and can_restart({**state,'enabled':state.get('enabled') or state.get('restart_pending')},runs,published,unchanged):dispatch()
   if active:state['last_run']=active[0]['databaseId']
   state['active']=active;state['updated_at']=time.time()
   temp=path.with_suffix('.tmp');temp.write_text(json.dumps(state));temp.chmod(0o644);temp.replace(path)

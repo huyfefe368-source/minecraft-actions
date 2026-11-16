@@ -3,6 +3,8 @@
 import hashlib, json, os, re, signal, socket, subprocess, sys, time, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from temp_mc_state import inventory
+from temp_mc_merge import merge_trees
+from collections import deque
 from pathlib import Path
 
 VPS="160.191.51.148"
@@ -19,6 +21,11 @@ checkpoint_lock=threading.Lock()
 last_snapshot=None
 phase="starting"
 cleanup_deadline=None
+base_manifest={}
+pending_snapshots=[]
+server_requests=deque()
+server_desired=True
+sync_state={"state":"idle","conflicts":[],"interval":5}
 
 class CheckpointInterrupted(Exception):pass
 
@@ -93,9 +100,11 @@ def setup():
     note("SSH check:",ssh("echo VPS_SSH_OK",seconds=30))
 
 def restore():
+    global base_manifest
     note("Restoring full server tree from private Git repository via VPS")
     note(ssh("sudo -n /opt/mc-temp12111/restore-tree.sh",seconds=240))
     rsync(REMOTE+":/srv/mc-temp12111/tree-repo/server/",str(SERVER)+"/",seconds=300)
+    base_manifest=inventory(SERVER,guard=check_control)
 
 
 def prepare():
@@ -128,8 +137,8 @@ def startup_ready(log,offset):
         stream.seek(offset);message=stream.read().decode(errors="replace")
     return bool(re.search(r"Done \([0-9.]+s\)!",message))
 
-def start():
-    global mc,tunnel
+def open_tunnel():
+    global tunnel
     tunnel=subprocess.Popen(["ssh",*opts(),"-N","-T","-o","ExitOnForwardFailure=yes",
         "-R","127.0.0.1:25578:127.0.0.1:25565",
         "-R","127.0.0.1:25579:127.0.0.1:25579",REMOTE],
@@ -138,6 +147,10 @@ def start():
     if tunnel.poll() is not None:
         raise RuntimeError("Reverse tunnel failed: "+
                            tunnel.stderr.read().decode(errors="replace")[-450:])
+
+def start():
+    global mc,phase
+    phase="starting"
     (SERVER/"logs").mkdir(exist_ok=True)
     log=SERVER/"logs"/"actions-console.log"
     log_offset=log.stat().st_size if log.exists() else 0
@@ -179,12 +192,14 @@ def shutdown():
         note("Java process exited:",mc.returncode)
 
 def checkpoint(final=False):
-    global last_snapshot,phase
+    global last_snapshot,phase,base_manifest
+    sync_state["state"]="syncing"
     with checkpoint_lock:
         phase="saving" if final else "checkpoint"
         snap=BASE/"snapshot"
         snap.mkdir(exist_ok=True)
-        if not final:
+        live=mc is not None and mc.poll() is None
+        if live:
             send("save-off")
             # Wait for the actual Minecraft acknowledgement, never a fixed guess.
             log=SERVER/"logs/actions-console.log"
@@ -207,7 +222,10 @@ def checkpoint(final=False):
         try:
             run(["rsync","-a","--delete",str(SERVER)+"/",str(snap)+"/"],seconds=90)
         finally:
-            if not final:send("save-on")
+            if live:send("save-on")
+        # Track otherwise-empty folders in Git without archives.
+        for directory in sorted(snap.rglob('*'),reverse=True):
+            if directory.is_dir() and not any(directory.iterdir()):(directory/'.gitkeep').touch()
         files=inventory(snap,guard=check_control)
         if "world/level.dat" not in files:raise RuntimeError("No world; refusing empty checkpoint")
         ident=os.environ["GITHUB_RUN_ID"]+"-"+str(time.time_ns())
@@ -215,12 +233,40 @@ def checkpoint(final=False):
         ssh("mkdir -p "+dest+"/server",seconds=30)
         rsync(str(snap)+"/",REMOTE+":"+dest+"/server/",seconds=180)
         manifest=XFER/"manifest.json"
-        manifest.write_text(json.dumps({"id":ident,"final":final,"files":files}))
+        manifest.write_text(json.dumps({"id":ident,"final":final,"files":files,"base":base_manifest,"pending":list(pending_snapshots)}))
         rsync(manifest,REMOTE+":"+dest+"/manifest.json",seconds=30)
-        ssh("touch "+dest+"/READY",seconds=20)
+        pending_snapshots.append(ident)
+        ssh("touch "+dest+"/READY && sudo -n /opt/mc-temp12111/publish-tree",seconds=20)
+        ack={}
+        ack_deadline=time.monotonic()+(120 if not final else 180)
+        while time.monotonic()<ack_deadline:
+            raw=ssh("if test -f /srv/mc-temp12111/tree-acks/"+ident+".json; then cat /srv/mc-temp12111/tree-acks/"+ident+".json; else echo '{}'; fi",seconds=15)
+            ack=json.loads(raw)
+            if ack.get('snapshot')==ident:break
+            time.sleep(1)
+        else:raise RuntimeError('Sync acknowledgement timeout; VPS retains snapshot')
+        if ack.get('error'):raise RuntimeError(ack['error'])
+        if ack.get('applied_remote') and not final:
+            sync_state['state']='applying'
+            restart=mc is not None and mc.poll() is None
+            if restart:shutdown()
+            incoming=BASE/'inbound';incoming.mkdir(exist_ok=True)
+            run(['rsync','-a','--delete','-e','ssh '+ ' '.join(opts()),REMOTE+':/srv/mc-temp12111/tree-repo/server/',str(incoming)+'/'],seconds=120)
+            target=BASE/'apply-tree'
+            import shutil
+            if target.exists():shutil.rmtree(target)
+            evidence=BASE/'apply-conflicts'/ident
+            result=merge_trees(files,SERVER,incoming,target,evidence)
+            run(['rsync','-a','--delete',str(target)+'/',str(SERVER)+'/'],seconds=60)
+            if result['conflicts'] and evidence.exists():
+                shutil.copytree(evidence,SERVER/'.sync-conflicts'/ident,dirs_exist_ok=True)
+            if restart and server_desired and not stop_requested.is_set():start()
+        base_manifest=ack['files']
+        pending_snapshots.clear()
+        sync_state.update(state='idle',last_sync=time.time(),conflicts=ack.get('conflicts',[]),commit=ack['commit'])
         last_snapshot=ident
         note("FULL_TREE_DURABLE_ON_VPS",ident,"final=",final)
-        phase="stopped" if final else "running"
+        phase="stopped" if final or mc is None or mc.poll() is not None else "running"
 
 class Console(BaseHTTPRequestHandler):
     def log_message(self,*args):pass
@@ -234,14 +280,21 @@ class Console(BaseHTTPRequestHandler):
         if log.exists():
             with log.open('rb') as f:
                 f.seek(max(0,log.stat().st_size-48000));lines=f.read().decode(errors='replace').splitlines()[-250:]
-        self.reply(200,{"phase":phase,"run_id":os.environ['GITHUB_RUN_ID'],"last_snapshot":last_snapshot,"log":lines})
+        self.reply(200,{"phase":phase,"run_id":os.environ['GITHUB_RUN_ID'],"last_snapshot":last_snapshot,"log":lines,"minecraft_running":mc is not None and mc.poll() is None,"sync":sync_state})
     def do_POST(self):
         try:
             size=int(self.headers.get('Content-Length','0'))
             if not 0<size<=4096:raise ValueError('Invalid request size')
-            data=json.loads(self.rfile.read(size));command=data.get('command','').strip()
+            data=json.loads(self.rfile.read(size))
+            if data.get('op')=='job-stop':
+                stop_requested.set();return self.reply(200,{'ok':True})
+            if data.get('op')=='server-control':
+                action=data.get('action')
+                if action not in ('start','restart','stop'):raise ValueError('Invalid Minecraft action')
+                server_requests.append(action);return self.reply(202,{'ok':True})
+            command=data.get('command','').strip()
             if not command or len(command)>1000 or '\n' in command or '\r' in command:raise ValueError('One Minecraft command required')
-            if command.lower()=='stop':stop_requested.set()
+            if command.lower()=='stop':server_requests.append('stop')
             else:send(command)
             self.reply(200,{"ok":True})
         except (ValueError,TypeError,AttributeError) as e:self.reply(400,{"error":str(e)})
@@ -257,7 +310,7 @@ def main():
     if not 10<=minutes<=330:raise RuntimeError("Duration must be 10..330 minutes")
     signal.signal(signal.SIGTERM,on_signal)
     signal.signal(signal.SIGINT,on_signal)
-    global phase,cleanup_deadline
+    global phase,cleanup_deadline,server_desired
     http=None
     result=0
     try:
@@ -265,18 +318,33 @@ def main():
         check_control()
         http=ThreadingHTTPServer(('127.0.0.1',25579),Console)
         threading.Thread(target=http.serve_forever,daemon=True).start()
+        open_tunnel()
         start();phase="running"
         if not stop_requested.is_set():checkpoint()
         until=time.monotonic()+minutes*60
-        next_save=time.monotonic()+60
-        while time.monotonic()<until and not stop_requested.wait(1):
+        next_save=time.monotonic()+5
+        while time.monotonic()<until and not stop_requested.wait(0.5):
             if (BASE/"stop-requested").exists():break
-            if mc.poll() is not None or tunnel.poll() is not None:
-                note("Server or tunnel ended early");break
+            if tunnel.poll() is not None:
+                note('Job tunnel ended');break
+            if server_requests:
+                action=server_requests.popleft()
+                if action in ('stop','restart'):
+                    server_desired=False
+                    shutdown()
+                    checkpoint()
+                    phase='stopped'
+                if action in ('start','restart'):
+                    server_desired=True
+                    if mc is None or mc.poll() is not None:
+                        prepare();start();phase='running'
+                next_save=time.monotonic()+5
+            if mc is not None and mc.poll() is not None:phase='stopped'
             if time.monotonic()>=next_save:
                 try:checkpoint()
-                except Exception as error:note("CHECKPOINT_RETRY",str(error))
-                next_save=time.monotonic()+60
+                except Exception as error:
+                    sync_state.update(state="error",error=str(error));note("CHECKPOINT_RETRY",str(error))
+                next_save=time.monotonic()+5
     except CheckpointInterrupted:
         note('Checkpoint interrupted for a normal early stop')
     except Exception as error:
