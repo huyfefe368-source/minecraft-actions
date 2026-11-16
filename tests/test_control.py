@@ -1,7 +1,10 @@
 import sys,time,unittest
 sys.path.insert(0,'scripts')
-from temp_mc_control import can_restart
+from temp_mc_control import can_restart,final_ready
 class ControlTests(unittest.TestCase):
+ def test_start_and_enable_wait_for_final_or_unchanged_baseline(self):
+  self.assertFalse(final_ready({'last_run':123},{'final':False,'snapshot':'123-1'}))
+  self.assertTrue(final_ready({'last_run':123},{},unchanged=True))
  def test_restart_requires_final_snapshot(self):
   s={'enabled':True,'last_run':123}
   self.assertFalse(can_restart(s,[],{'snapshot':'123-1','final':False}))

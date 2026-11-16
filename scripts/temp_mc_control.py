@@ -9,12 +9,14 @@ WORKFLOW='temp-purpur-playtest.yml'
 def gh(*args):
  return subprocess.check_output(['gh',*args],text=True,timeout=25,env={**os.environ,'HOME':'/root','GH_PROMPT_DISABLED':'1'})
 
-def can_restart(state,runs,published):
+def final_ready(state,published,unchanged=False):
+ last=state.get('last_run')
+ return not last or unchanged or bool(published.get('final') and published.get('snapshot','').startswith(str(last)+'-'))
+
+def can_restart(state,runs,published,unchanged=False):
  if not state.get('enabled') or any(r['status']!='completed' for r in runs):return False
  if time.time()-state.get('dispatched_at',0)<90:return False
- last=state.get('last_run')
- if last and not (published.get('final') and published.get('snapshot','').startswith(str(last)+'-')):return False
- return True
+ return final_ready(state,published,unchanged)
 
 def main(action):
  if action not in ('status','start','stop','enable','disable','tick'):raise ValueError('Invalid action')
@@ -25,6 +27,7 @@ def main(action):
   runs=json.loads(gh('run','list','-R',REPO,'--workflow',WORKFLOW,'--limit','8','--json','databaseId,status,conclusion,url'))
   active=[r for r in runs if r['status']!='completed']
   saved=BASE/'published.json';published=json.loads(saved.read_text()) if saved.exists() else {}
+  unchanged=(BASE/'completed-without-launch'/str(state.get('last_run'))).is_file()
   def dispatch():
    output=gh('workflow','run',WORKFLOW,'-R',REPO,'--ref','main','-f','duration_minutes=330')
    match=re.search(r'/runs/(\d+)',output)
@@ -40,9 +43,11 @@ def main(action):
   elif action=='disable':state['enabled']=False;state['message']='24/7 đã tắt; phiên hiện tại tiếp tục chạy'
   elif action in ('start','enable'):
    if action=='enable':state['enabled']=True
-   if not active and time.time()-state.get('dispatched_at',0)>=90:dispatch()
+   if not active and time.time()-state.get('dispatched_at',0)>=90:
+    if final_ready(state,published,unchanged):dispatch()
+    else:state['message']='Đang chờ bản lưu cuối lên repo; chưa bật job mới'
    else:state['message']='Job đang chạy hoặc đang khởi tạo'
-  elif action=='tick' and can_restart(state,runs,published):dispatch()
+  elif action=='tick' and can_restart(state,runs,published,unchanged):dispatch()
   if active:state['last_run']=active[0]['databaseId']
   state['active']=active;state['updated_at']=time.time()
   temp=path.with_suffix('.tmp');temp.write_text(json.dumps(state));temp.chmod(0o644);temp.replace(path)

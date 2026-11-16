@@ -290,7 +290,10 @@ def main():
             raise RuntimeError("Java is still alive; refusing inconsistent final snapshot")
         try:
             if mc is not None:checkpoint(final=True)
-            else:note('Stopped before Java launch; keep previous complete server tree')
+            else:
+                note('Stopped before Java launch; keep previous complete server tree')
+                if stop_requested.is_set() and KEY.exists():
+                    ssh('mkdir -p /srv/mc-temp12111/completed-without-launch && touch /srv/mc-temp12111/completed-without-launch/'+os.environ['GITHUB_RUN_ID'],seconds=10)
         except Exception as error:
             phase="backup-failed";note("FINAL_TREE_BACKUP_FAILED",str(error));result=1
         finally:
