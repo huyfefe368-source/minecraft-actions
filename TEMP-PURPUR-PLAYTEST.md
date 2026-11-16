@@ -20,3 +20,5 @@ The worker flushes world saves, mirrors to VPS every 60 seconds, and the publish
 Ordinary Actions Cancel cancels the monitoring step and executes the `always()` stop/save step; the systemd worker is outside the step process tree. Do not use Force cancel while saving. Force cancel, destroyed VMs, failed networking or storage can lose changes since the last complete checkpoint.
 
 The previous archive Release remains available as a migration recovery point. Future jobs restore the individual files from the private Git tree through VPS.
+
+Rejected manifests or oversized snapshots are retained under `/srv/mc-temp12111/tree-rejected/` and do not block later valid trees. Stop interrupts an in-progress checkpoint and initialization promptly; a final cleanup budget reserves time inside the Actions cancellation window. On exhausted cleanup/network budget, recover from the last complete checkpoint.
