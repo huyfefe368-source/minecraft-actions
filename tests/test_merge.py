@@ -1,3 +1,4 @@
+import shutil
 import sys
 import tempfile
 import unittest
@@ -90,5 +91,18 @@ class MergeTests(unittest.TestCase):
         self.put(self.local,'thing','repo'); self.put(self.remote,'thing/child','runtime')
         with self.assertRaises(ValueError): self.merge({})
         self.assertFalse(self.target.exists())
+
+class MetadataTests(unittest.TestCase):
+    def test_unchanged_file_mtime_survives_merge(self):
+        import os
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            local=root/'local';remote=root/'remote';local.mkdir();remote.mkdir()
+            (local/'server.jar').write_bytes(b'jar')
+            os.utime(local/'server.jar',ns=(100000000000,100000000000))
+            shutil.copy2(local/'server.jar',remote/'server.jar')
+            base=inventory(local)
+            merge_trees(base,local,remote,root/'target',root/'conflict')
+            self.assertEqual((root/'target/server.jar').stat().st_mtime_ns,(local/'server.jar').stat().st_mtime_ns)
 
 if __name__=='__main__': unittest.main()

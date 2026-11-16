@@ -25,4 +25,4 @@ Publisher chỉ xác nhận sau khi push Git thành công. Nếu remote vừa th
 
 ## Kiểm tra
 
-23 kiểm tra qua trên VPS. Đã thử thực tế: tạo file/thư mục từ GitHub rồi quan sát file xuất hiện trong snapshot gửi lại từ Actions; log phát sinh trên Actions lên GitHub; xóa file/thư mục từ GitHub truyền xuống Actions; Stop, Start và Restart Minecraft giữ nguyên job 43868217325. File thử đã được xóa. Cơ chế Restart Job chờ bản lưu cuối trước khi tạo phiên mới.
+24 kiểm tra qua trên VPS. Đã thử thực tế: tạo file/thư mục từ GitHub rồi quan sát file xuất hiện trong snapshot gửi lại từ Actions; log phát sinh trên Actions lên GitHub; xóa file/thư mục từ GitHub truyền xuống Actions; Stop, Start và Restart Minecraft giữ nguyên job 43868217325. File thử đã được xóa. Cơ chế Restart Job chờ bản lưu cuối trước khi tạo phiên mới.

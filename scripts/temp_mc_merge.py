@@ -39,7 +39,7 @@ def _copy(files, source, destination):
     for name in files:
         path = destination / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source / name, path)
+        shutil.copy2(source / name, path)
 
 
 def merge_trees(base, local, remote, target, conflicts):
