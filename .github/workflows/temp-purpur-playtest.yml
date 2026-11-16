@@ -8,12 +8,7 @@ on:
         required: true
         default: '120'
         type: choice
-        options:
-          - '20'
-          - '60'
-          - '120'
-          - '180'
-          - '240'
+        options: ['20', '60', '120', '180', '240']
 
 permissions:
   contents: read
@@ -24,7 +19,7 @@ concurrency:
 
 jobs:
   purpur-dev-test:
-    name: Run Purpur, gracefully stop, archive everything, upload to private release
+    name: Purpur with remote console and full Git tree persistence
     runs-on: ubuntu-24.04
     timeout-minutes: 330
     steps:
@@ -33,18 +28,12 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
-      - name: Verify archive utilities
-        run: |
-          set -euo pipefail
-          command -v zstd || (sudo apt-get update -qq && sudo apt-get install -y zstd)
-          command -v rsync || (sudo apt-get update -qq && sudo apt-get install -y rsync)
-          command -v ssh
-          command -v curl
-          command -v unzip
-          java -version
-      - name: Restore and run Minecraft, then publish full backup
+      - name: Start and monitor Minecraft worker
         env:
           TEMP_PURPUR_SSH_KEY: ${{ secrets.TEMP_PURPUR_SSH_KEY }}
           PYTHONUNBUFFERED: '1'
-        run: |
-          python3 scripts/temp-purpur-runner.py '${{ inputs.duration_minutes }}'
+        run: python3 scripts/temp_mc_service.py start '${{ inputs.duration_minutes }}'
+      - name: Always stop Minecraft and persist full server tree
+        if: ${{ always() }}
+        timeout-minutes: 5
+        run: python3 scripts/temp_mc_service.py stop

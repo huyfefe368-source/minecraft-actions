@@ -1,0 +1,76 @@
+import importlib.util
+import json
+import tempfile
+import unittest
+import subprocess
+import sys
+from pathlib import Path
+
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+class PersistenceTests(unittest.TestCase):
+    def test_manifest_detects_partial_transfer_and_extra_files(self):
+        m = load('state', 'scripts/temp_mc_state.py')
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d); (root/'world').mkdir()
+            (root/'world/level.dat').write_bytes(b'world')
+            manifest=m.inventory(root)
+            m.verify(root,manifest)
+            (root/'world/level.dat').write_bytes(b'partial')
+            with self.assertRaises(ValueError):m.verify(root,manifest)
+            (root/'world/level.dat').write_bytes(b'world')
+            (root/'extra').write_text('stale')
+            with self.assertRaises(ValueError):m.verify(root,manifest)
+
+    def test_symlink_cannot_publish_files_outside_server(self):
+        m=load('state','scripts/temp_mc_state.py')
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d); (root/'escape').symlink_to('/etc/passwd')
+            with self.assertRaises(ValueError):m.inventory(root)
+
+    def test_cleanup_signal_does_not_interrupt_final_backup(self):
+        import os
+        os.environ.setdefault('RUNNER_TEMP','/tmp')
+        m=load('runner','scripts/temp-purpur-runner.py')
+        m.on_signal(2,None)
+        self.assertTrue(m.stop_requested.is_set())
+        m.on_signal(15,None)
+        self.assertTrue(m.stop_requested.is_set())
+
+    def test_failed_git_push_retains_snapshot_and_retry_publishes(self):
+        sys.path.insert(0,'scripts')
+        m=load('publisher','scripts/temp_mc_publish.py')
+        state=load('state','scripts/temp_mc_state.py')
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d); remote=root/'remote.git'; repo=root/'repo'
+            def git(*args):
+                return subprocess.run(['git',*map(str,args)],check=True,capture_output=True)
+            git('init','--bare',remote)
+            git('clone',remote,repo)
+            git('-C',repo,'config','user.email','test@example.test')
+            git('-C',repo,'config','user.name','Test')
+            git('-C',repo,'checkout','-b','main')
+            (repo/'README').write_text('test')
+            git('-C',repo,'add','.');git('-C',repo,'commit','-m','init')
+            git('-C',repo,'push','-u','origin','main')
+            hook=remote/'hooks/pre-receive';hook.write_text('#!/bin/sh\nexit 1\n');hook.chmod(0o755)
+            incoming=root/'tree-incoming/123-1'; server=incoming/'server'
+            (server/'world').mkdir(parents=True)
+            (server/'world/level.dat').write_bytes(b'world')
+            (server/'server.jar').write_bytes(b'jar')
+            (incoming/'manifest.json').write_text(json.dumps({'id':'123-1','final':True,'files':state.inventory(server)}))
+            (incoming/'READY').touch()
+            m.BASE=root;m.REPO=repo
+            with self.assertRaises(subprocess.CalledProcessError):m.publish(root/'lock')
+            self.assertTrue((incoming/'READY').exists())
+            self.assertFalse((root/'published.json').exists())
+            hook.unlink();m.publish(root/'lock')
+            self.assertFalse(incoming.exists())
+            self.assertTrue(json.loads((root/'published.json').read_text())['final'])
+            self.assertEqual((repo/'server/world/level.dat').read_bytes(),b'world')
+
+if __name__=='__main__':unittest.main()
