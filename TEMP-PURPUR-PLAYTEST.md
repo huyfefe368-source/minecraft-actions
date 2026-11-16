@@ -22,3 +22,11 @@ Ordinary Actions Cancel cancels the monitoring step and executes the `always()` 
 The previous archive Release remains available as a migration recovery point. Future jobs restore the individual files from the private Git tree through VPS.
 
 Rejected manifests or oversized snapshots are retained under `/srv/mc-temp12111/tree-rejected/` and do not block later valid trees. Stop interrupts an in-progress checkpoint and initialization promptly; a final cleanup budget reserves time inside the Actions cancellation window. On exhausted cleanup/network budget, recover from the last complete checkpoint.
+
+## Console lifecycle controls
+
+Current URL: https://mc-console.160.191.51.148.nip.io/?v=control3
+
+Bật server/job dispatches a 330-minute session. Dừng server/job saves and ends the job, disabling 24/7 first. Turning 24/7 off alone lets the current session finish. When on, the VPS controller waits for the previous job to complete and its final Git receipt before dispatching another session. Sessions end after roughly 5h30m, before the 6-hour limit. Restart has downtime during save, transfer and restore; this is not uninterrupted hosting. Initialization cancelled before Java launch preserves the existing baseline.
+
+Validated: 11 automated tests; authenticated console Start created 43864574977; simulated session deadline saved final commit 805601f then automatically dispatched 43865040266; console Stop disabled continuous mode and cancelled initialization safely. Server left offline and 24/7 off.
