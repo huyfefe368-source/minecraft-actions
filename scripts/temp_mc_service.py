@@ -30,7 +30,7 @@ def main():
             os.chmod(key,0o600);f.write(values['TEMP_PURPUR_SSH_KEY'])
         envfile.write_text(envfile.read_text()+'TEMP_PURPUR_KEY_FILE="'+str(key)+'"\n')
         subprocess.run(['sudo','systemd-run','--unit='+unit,'--property=Type=exec',
-            '--property=RuntimeMaxSec=18500','--property=TimeoutStopSec=240',
+            '--property=RuntimeMaxSec=20700','--property=TimeoutStopSec=240',
             '--property=EnvironmentFile='+str(envfile),
             '--property=WorkingDirectory='+os.getcwd(),
             '--property=StandardOutput=append:'+str(log),
@@ -38,7 +38,7 @@ def main():
             '/usr/bin/python3',str(Path('scripts/temp-purpur-runner.py').resolve()),sys.argv[2]],check=True)
     else:
         (base/'stop-requested').touch()
-    deadline=time.monotonic()+(280 if mode=='stop' else 18500)
+    deadline=time.monotonic()+(280 if mode=='stop' else 20700)
     offset=0
     while time.monotonic()<deadline:
         if log.exists():

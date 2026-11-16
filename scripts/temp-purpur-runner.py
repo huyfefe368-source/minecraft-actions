@@ -254,7 +254,7 @@ def main():
     if len(sys.argv)!=2 or not re.fullmatch("[0-9]{1,3}",sys.argv[1]):
         raise RuntimeError("Usage: runner.py DURATION_MINUTES")
     minutes=int(sys.argv[1])
-    if not 10<=minutes<=270:raise RuntimeError("Duration must be 10..270 minutes")
+    if not 10<=minutes<=330:raise RuntimeError("Duration must be 10..330 minutes")
     signal.signal(signal.SIGTERM,on_signal)
     signal.signal(signal.SIGINT,on_signal)
     global phase,cleanup_deadline
