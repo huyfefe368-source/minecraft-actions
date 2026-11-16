@@ -35,3 +35,5 @@
 ## Validation
 
 Eight unit/integration tests pass on VPS. Console HTTPS rejects unauthenticated requests (401) and accepts authenticated commands (200). Stop run 43861107055 completed successfully and final snapshot 421e00d was published. Cancel run 43861524011 completed cancelled with the always() save step successful; final snapshot 5bbc0af was SHA-256 verified and contains a command sent immediately before cancellation. Initialization cancellation, slow checkpoint interruption, total cleanup deadline and malformed-snapshot quarantine have regression tests. Code review found no remaining P1/P2 blockers after fixes.
+
+Final deployed-code Cancel test: run 43862665214 completed cancelled with stop/save cleanup successful. Final snapshot commit 37c0371 was published, exact manifest verified, and FINAL_CANCEL_TEST console command retained. Server is offline.
