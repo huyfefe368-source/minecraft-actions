@@ -25,6 +25,7 @@ base_manifest={}
 pending_snapshots=[]
 server_requests=deque()
 server_desired=True
+sync_restart_pending=False
 sync_state={"state":"idle","conflicts":[],"interval":5}
 
 class CheckpointInterrupted(Exception):pass
@@ -192,7 +193,7 @@ def shutdown():
         note("Java process exited:",mc.returncode)
 
 def checkpoint(final=False):
-    global last_snapshot,phase,base_manifest
+    global last_snapshot,phase,base_manifest,sync_restart_pending
     sync_state["state"]="syncing"
     with checkpoint_lock:
         phase="saving" if final else "checkpoint"
@@ -249,7 +250,9 @@ def checkpoint(final=False):
         if ack.get('applied_remote') and not final:
             sync_state['state']='applying'
             restart=mc is not None and mc.poll() is None
-            if restart:shutdown()
+            if restart:
+                sync_restart_pending=server_desired
+                shutdown()
             incoming=BASE/'inbound';incoming.mkdir(exist_ok=True)
             run(['rsync','-a','--delete','-e','ssh '+ ' '.join(opts()),REMOTE+':/srv/mc-temp12111/tree-repo/server/',str(incoming)+'/'],seconds=120)
             target=BASE/'apply-tree'
@@ -260,13 +263,36 @@ def checkpoint(final=False):
             run(['rsync','-a','--delete',str(target)+'/',str(SERVER)+'/'],seconds=60)
             if result['conflicts'] and evidence.exists():
                 shutil.copytree(evidence,SERVER/'.sync-conflicts'/ident,dirs_exist_ok=True)
-            if restart and server_desired and not stop_requested.is_set():start()
+        if not final:resume_minecraft()
         base_manifest=ack['files']
         pending_snapshots.clear()
         sync_state.update(state='idle',last_sync=time.time(),conflicts=ack.get('conflicts',[]),commit=ack['commit'])
         last_snapshot=ident
         note("FULL_TREE_DURABLE_ON_VPS",ident,"final=",final)
         phase="stopped" if final or mc is None or mc.poll() is not None else "running"
+
+def resume_minecraft():
+    global sync_restart_pending,phase
+    if sync_restart_pending and server_desired and not stop_requested.is_set():
+        if mc is None or mc.poll() is not None:
+            prepare();start();phase='running'
+        sync_restart_pending=False
+
+def handle_server_action(action):
+    global server_desired,sync_restart_pending,phase
+    server_desired=action!='stop'
+    sync_restart_pending=action in ('start','restart')
+    try:
+        if action in ('stop','restart'):
+            shutdown();phase='stopped';checkpoint()
+        if action in ('start','restart'):resume_minecraft()
+        return True
+    except CheckpointInterrupted:raise
+    except Exception as error:
+        sync_state.update(state='error',error=str(error))
+        note('MINECRAFT_ACTION_RETRY',action,str(error))
+        return False
+
 
 class Console(BaseHTTPRequestHandler):
     def log_message(self,*args):pass
@@ -328,16 +354,7 @@ def main():
             if tunnel.poll() is not None:
                 note('Job tunnel ended');break
             if server_requests:
-                action=server_requests.popleft()
-                if action in ('stop','restart'):
-                    server_desired=False
-                    shutdown()
-                    checkpoint()
-                    phase='stopped'
-                if action in ('start','restart'):
-                    server_desired=True
-                    if mc is None or mc.poll() is not None:
-                        prepare();start();phase='running'
+                handle_server_action(server_requests.popleft())
                 next_save=time.monotonic()+5
             if mc is not None and mc.poll() is not None:phase='stopped'
             if time.monotonic()>=next_save:
