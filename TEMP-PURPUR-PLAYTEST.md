@@ -1,32 +1,28 @@
-# Purpur 1.21.11 playtest
+# Minecraft console
 
-Public workflow repository: huyfefe368-source/minecraft-actions.
-Private server data: huyfefe368-source/minecraft-temporary-backups, `server/` on `main`.
+Console: https://mc-console.160.191.51.148.nip.io/?v=sync7
 
-Start `temp-purpur-playtest.yml` manually. Java address: `160.191.51.148:25577`.
+Tài khoản giữ nguyên; thông tin đăng nhập chỉ nằm tại `/root/minecraft-console-login.txt` trên VPS.
 
-## Remote console
+| Nhóm | Start | Restart | Stop |
+|---|---|---|---|
+| Job server | Tạo job và chạy Minecraft | Lưu, kết thúc job, tạo job mới | Lưu, kết thúc job, tắt 24/7 |
+| Minecraft | Chạy Java trong job hiện tại | Tắt rồi chạy lại Java trong cùng job | Chỉ tắt Java; job và đồng bộ vẫn chạy |
 
-https://mc-console.160-191-51-148.sslip.io/
+Stop Minecraft vẫn tiêu thụ thời gian của job. Bật 24/7 để chuyển job sau khoảng 5 giờ 30 phút; tắt công tắc chỉ ngăn phiên kế tiếp. Mỗi lần chuyển job có gián đoạn lúc lưu/khôi phục.
 
-HTTPS basic authentication is required. Credentials are stored only in `/root/minecraft-console-login.txt` on the VPS (first line username, second password). Retrieve using your own SSH session. Console shows live logs, accepts Minecraft commands, and has Stop and Save. No OS shell commands are accepted.
+## Đồng bộ hai chiều
 
-## Persistence and stopping
+Phạm vi: `server/` trong repo riêng tư `huyfefe368-source/minecraft-temporary-backups` ↔ thư mục `server/` của worker Actions. Thêm, sửa và xóa file/thư mục được truyền cả hai chiều. Thư mục rỗng dùng `.gitkeep` để Git lưu được. Không tạo archive mới.
 
-Each complete checkpoint contains all regular server files including jars, libraries, plugins, dotfiles, configuration and worlds. No new tar/zip archives are created. Git cannot represent empty directories; Minecraft recreates them. No files currently exceed the GitHub 100 MiB limit. An oversized file causes a visible error and retains the snapshot on VPS.
+Một vòng mới bắt đầu khoảng 5 giây sau vòng trước. Truyền dữ liệu, kiểm tra checksum, commit và push cần thêm thời gian; đây là đồng bộ liên tục theo đợt, không phải ổ đĩa dùng chung tức thời. Trong thử nghiệm, thay đổi nhỏ thường cần hàng chục giây; file lớn và khởi động Minecraft cần lâu hơn.
 
-The worker flushes world saves, mirrors to VPS every 60 seconds, and the publisher validates SHA-256 before committing. During Stop, Java exits before final snapshot. VPS pushes asynchronously and retries every 20 seconds. A failed Git push retains staging. Check the console for the final commit receipt.
+Thay đổi từ repo được áp dụng khi Minecraft đã dừng an toàn, rồi Minecraft chạy lại trong cùng job nếu trước đó đang chạy. Nếu Minecraft đã được Stop riêng, việc đồng bộ không tự bật lại nó. Thông số cấu hình từ repo được giữ nguyên; tunnel đọc cổng Minecraft đã cấu hình.
 
-Ordinary Actions Cancel cancels the monitoring step and executes the `always()` stop/save step; the systemd worker is outside the step process tree. Do not use Force cancel while saving. Force cancel, destroyed VMs, failed networking or storage can lose changes since the last complete checkpoint.
+Hai bên cùng sửa một file: giữ bằng chứng hai phiên bản trong `conflicts/<snapshot>/` ở repo, mặc định chọn bản repo. Log và `.sync-conflicts/` ưu tiên bản Actions. World được xử lý nguyên thư mục, không trộn các region từ hai trạng thái; thay đổi world từ repo ưu tiên cả world đó và giữ bản Actions cũ khi có xung đột. Thay đổi phát sinh lúc đang truyền còn được giữ dưới `server/.sync-conflicts/` nếu cần.
 
-The previous archive Release remains available as a migration recovery point. Future jobs restore the individual files from the private Git tree through VPS.
+Publisher chỉ xác nhận sau khi push Git thành công. Nếu remote vừa thay đổi hoặc push lỗi, snapshot còn trên VPS để thử lại. Giới hạn file đơn của GitHub vẫn là 100 MiB; bản lỗi được giữ trong `tree-rejected/`. Force cancel, VM mất đột ngột và lỗi mạng/ổ đĩa vẫn có thể mất thay đổi sau vòng đồng bộ gần nhất.
 
-Rejected manifests or oversized snapshots are retained under `/srv/mc-temp12111/tree-rejected/` and do not block later valid trees. Stop interrupts an in-progress checkpoint and initialization promptly; a final cleanup budget reserves time inside the Actions cancellation window. On exhausted cleanup/network budget, recover from the last complete checkpoint.
+## Kiểm tra
 
-## Console lifecycle controls
-
-Current URL: https://mc-console.160.191.51.148.nip.io/?v=control3
-
-Bật server/job dispatches a 330-minute session. Dừng server/job saves and ends the job, disabling 24/7 first. Turning 24/7 off alone lets the current session finish. When on, the VPS controller waits for the previous job to complete and its final Git receipt before dispatching another session. Sessions end after roughly 5h30m, before the 6-hour limit. Restart has downtime during save, transfer and restore; this is not uninterrupted hosting. Initialization cancelled before Java launch preserves the existing baseline.
-
-Validated: 11 automated tests; authenticated console Start created 43864574977; simulated session deadline saved final commit 805601f then automatically dispatched 43865040266; console Stop disabled continuous mode and cancelled initialization safely. Server left offline and 24/7 off.
+23 kiểm tra qua trên VPS. Đã thử thực tế: tạo file/thư mục từ GitHub rồi quan sát file xuất hiện trong snapshot gửi lại từ Actions; log phát sinh trên Actions lên GitHub; xóa file/thư mục từ GitHub truyền xuống Actions; Stop, Start và Restart Minecraft giữ nguyên job 43868217325. File thử đã được xóa. Cơ chế Restart Job chờ bản lưu cuối trước khi tạo phiên mới.
