@@ -19,13 +19,21 @@ def publish(lock_path='/run/lock/mc-tree-publish.lock'):
         fcntl.flock(lock,fcntl.LOCK_EX)
         for marker in sorted((BASE/'tree-incoming').glob('*/READY')):
             incoming=marker.parent
-            info=json.loads((incoming/'manifest.json').read_text())
-            verify(incoming/'server',info['files'])
-            if 'world/level.dat' not in info['files'] or 'server.jar' not in info['files']:
-                raise ValueError('Snapshot is not a complete Minecraft server')
-            oversized=[p for p,v in info['files'].items() if v['size']>=100*1024*1024]
-            if oversized:
-                raise ValueError('GitHub 100 MiB limit; VPS retains snapshot: '+str(oversized))
+            try:
+                info=json.loads((incoming/'manifest.json').read_text())
+                verify(incoming/'server',info['files'])
+                if 'world/level.dat' not in info['files'] or 'server.jar' not in info['files']:
+                    raise ValueError('Snapshot is not a complete Minecraft server')
+                oversized=[p for p,v in info['files'].items() if v['size']>=100*1024*1024]
+                if oversized:
+                    raise ValueError('GitHub 100 MiB limit: '+str(oversized))
+            except (ValueError,OSError,KeyError,TypeError) as error:
+                rejected=BASE/'tree-rejected';rejected.mkdir(exist_ok=True)
+                target=rejected/incoming.name
+                incoming.rename(target)
+                (target/'rejection.txt').write_text(str(error))
+                print('SNAPSHOT_QUARANTINED',incoming.name,str(error),flush=True)
+                continue
             run(['git','-C',str(REPO),'pull','--ff-only'])
             run(['rsync','-a','--delete',str(incoming/'server')+'/',str(REPO/'server')+'/'])
             # An external ignore file must never silently omit server files.

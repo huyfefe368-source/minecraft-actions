@@ -18,13 +18,44 @@ stop_requested=threading.Event()
 checkpoint_lock=threading.Lock()
 last_snapshot=None
 phase="starting"
+cleanup_deadline=None
+
+class CheckpointInterrupted(Exception):pass
+
+def check_control():
+    if phase in ('checkpoint','starting') and (stop_requested.is_set() or (BASE/'stop-requested').exists()):
+        stop_requested.set()
+        raise CheckpointInterrupted('Stop requested; reserve time for final snapshot')
+    if cleanup_deadline is not None and time.monotonic()>=cleanup_deadline:
+        raise subprocess.TimeoutExpired('final snapshot cleanup budget',240)
 
 def note(*a): print("[PURPUR 1.21.11]",*a,flush=True)
 
 def run(args,seconds=150,capture=False):
-    r=subprocess.run([str(a) for a in args],check=True,timeout=seconds,
-                     text=True,capture_output=capture)
-    return r.stdout.strip() if capture else ""
+    check_control()
+    args=[str(a) for a in args]
+    deadline=time.monotonic()+seconds
+    if cleanup_deadline is not None:deadline=min(deadline,cleanup_deadline)
+    proc=subprocess.Popen(args,text=True,start_new_session=True,
+        stdout=subprocess.PIPE if capture else None,stderr=subprocess.PIPE if capture else None)
+    try:
+        while True:
+            check_control()
+            remaining=deadline-time.monotonic()
+            if remaining<=0:raise subprocess.TimeoutExpired(args,seconds)
+            try:
+                stdout,stderr=proc.communicate(timeout=min(0.25,remaining))
+                break
+            except subprocess.TimeoutExpired:pass
+        if proc.returncode:raise subprocess.CalledProcessError(proc.returncode,args,stdout,stderr)
+        return stdout.strip() if capture else ''
+    except BaseException:
+        if proc.poll() is None:
+            os.killpg(proc.pid,signal.SIGTERM)
+            try:proc.communicate(timeout=1)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid,signal.SIGKILL);proc.communicate()
+        raise
 
 def opts():
     return ["-i",str(KEY),"-o","BatchMode=yes","-o","IdentitiesOnly=yes",
@@ -161,6 +192,10 @@ def checkpoint(final=False):
             send("save-all flush")
             limit=time.monotonic()+60
             while time.monotonic()<limit:
+                try:check_control()
+                except CheckpointInterrupted:
+                    send('save-on')
+                    raise
                 with log.open() as stream:
                     stream.seek(offset); message=stream.read()
                 if "Saved the game" in message or "All dimensions are saved" in message:break
@@ -173,7 +208,7 @@ def checkpoint(final=False):
             run(["rsync","-a","--delete",str(SERVER)+"/",str(snap)+"/"],seconds=90)
         finally:
             if not final:send("save-on")
-        files=inventory(snap)
+        files=inventory(snap,guard=check_control)
         if "world/level.dat" not in files:raise RuntimeError("No world; refusing empty checkpoint")
         ident=os.environ["GITHUB_RUN_ID"]+"-"+str(time.time_ns())
         dest="/srv/mc-temp12111/tree-incoming/"+ident
@@ -222,12 +257,14 @@ def main():
     if not 10<=minutes<=270:raise RuntimeError("Duration must be 10..270 minutes")
     signal.signal(signal.SIGTERM,on_signal)
     signal.signal(signal.SIGINT,on_signal)
-    setup();restore();prepare()
-    global phase
-    http=ThreadingHTTPServer(('127.0.0.1',25579),Console)
-    threading.Thread(target=http.serve_forever,daemon=True).start()
+    global phase,cleanup_deadline
+    http=None
     result=0
     try:
+        setup();restore();prepare()
+        check_control()
+        http=ThreadingHTTPServer(('127.0.0.1',25579),Console)
+        threading.Thread(target=http.serve_forever,daemon=True).start()
         start();phase="running"
         if not stop_requested.is_set():checkpoint()
         until=time.monotonic()+minutes*60
@@ -240,19 +277,26 @@ def main():
                 try:checkpoint()
                 except Exception as error:note("CHECKPOINT_RETRY",str(error))
                 next_save=time.monotonic()+60
+    except CheckpointInterrupted:
+        note('Checkpoint interrupted for a normal early stop')
     except Exception as error:
         result=1;note("SESSION_ERROR",str(error))
     finally:
         phase="stopping"
+        # Reserve 40 seconds for the Actions finalizer and VM cleanup.
+        cleanup_deadline=time.monotonic()+240
         shutdown()
         if mc is not None and mc.poll() is None:
             raise RuntimeError("Java is still alive; refusing inconsistent final snapshot")
-        try:checkpoint(final=True)
+        try:
+            if mc is not None:checkpoint(final=True)
+            else:note('Stopped before Java launch; keep previous complete server tree')
         except Exception as error:
             phase="backup-failed";note("FINAL_TREE_BACKUP_FAILED",str(error));result=1
         finally:
             if tunnel is not None and tunnel.poll() is None:tunnel.terminate()
-        http.shutdown()
+        if http is not None:http.shutdown()
+        BASE.mkdir(parents=True,exist_ok=True)
         (BASE/"result").write_text(str(result))
         note("Done; full tree retained on VPS; publisher retries Git push independently")
     return result

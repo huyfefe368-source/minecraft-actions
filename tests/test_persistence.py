@@ -4,6 +4,9 @@ import tempfile
 import unittest
 import subprocess
 import sys
+import threading
+import time
+from unittest.mock import patch
 from pathlib import Path
 
 def load(name, path):
@@ -51,8 +54,50 @@ class PersistenceTests(unittest.TestCase):
         m=load('runner','scripts/temp-purpur-runner.py')
         m.on_signal(2,None)
         self.assertTrue(m.stop_requested.is_set())
+
+    def test_stop_interrupts_inflight_checkpoint_command(self):
+        import os
+        os.environ.setdefault('RUNNER_TEMP','/tmp')
+        m=load('runner','scripts/temp-purpur-runner.py')
+        with tempfile.TemporaryDirectory() as d:
+            m.BASE=Path(d);m.phase='checkpoint'
+            timer=threading.Timer(0.2,lambda:(m.BASE/'stop-requested').touch())
+            timer.start();started=time.monotonic()
+            try:
+                with self.assertRaises(m.CheckpointInterrupted):
+                    m.run([sys.executable,'-c','import time;time.sleep(10)'])
+            finally:timer.join()
+            self.assertLess(time.monotonic()-started,3)
+
+    def test_final_transfer_obeys_overall_cleanup_deadline(self):
+        import os
+        os.environ.setdefault('RUNNER_TEMP','/tmp')
+        m=load('runner','scripts/temp-purpur-runner.py')
+        m.phase='saving';m.cleanup_deadline=time.monotonic()+0.2
+        started=time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            m.run([sys.executable,'-c','import time;time.sleep(10)'])
+        self.assertLess(time.monotonic()-started,3)
         m.on_signal(15,None)
         self.assertTrue(m.stop_requested.is_set())
+
+    def test_cancel_during_restore_never_publishes_partial_tree(self):
+        import os,signal
+        os.environ.setdefault('RUNNER_TEMP','/tmp')
+        m=load('runner','scripts/temp-purpur-runner.py')
+        with tempfile.TemporaryDirectory() as d:
+            m.BASE=Path(d)
+            timer=threading.Timer(0.2,lambda:(m.BASE/'stop-requested').touch())
+            def restore():m.run([sys.executable,'-c','import time;time.sleep(10)'])
+            original={sig:signal.getsignal(sig) for sig in (signal.SIGINT,signal.SIGTERM)}
+            timer.start();started=time.monotonic()
+            try:
+                with patch.object(sys,'argv',['runner.py','20']),patch.object(m,'setup'),patch.object(m,'restore',restore),patch.object(m,'checkpoint',side_effect=AssertionError('Partial tree published')):
+                    self.assertEqual(m.main(),0)
+            finally:
+                timer.join()
+                for sig,handler in original.items():signal.signal(sig,handler)
+            self.assertLess(time.monotonic()-started,3)
 
     def test_failed_git_push_retains_snapshot_and_retry_publishes(self):
         sys.path.insert(0,'scripts')
@@ -77,8 +122,13 @@ class PersistenceTests(unittest.TestCase):
             (server/'server.jar').write_bytes(b'jar')
             (incoming/'manifest.json').write_text(json.dumps({'id':'123-1','final':True,'files':state.inventory(server)}))
             (incoming/'READY').touch()
+            rejected=root/'tree-incoming/122-0'
+            (rejected/'server').mkdir(parents=True)
+            (rejected/'manifest.json').write_text('{broken json')
+            (rejected/'READY').touch()
             m.BASE=root;m.REPO=repo
             with self.assertRaises(subprocess.CalledProcessError):m.publish(root/'lock')
+            self.assertTrue((root/'tree-rejected/122-0/READY').exists())
             self.assertTrue((incoming/'READY').exists())
             self.assertFalse((root/'published.json').exists())
             hook.unlink();m.publish(root/'lock')
