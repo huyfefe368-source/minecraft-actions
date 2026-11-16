@@ -24,10 +24,20 @@ def main(action):
   fcntl.flock(lock,fcntl.LOCK_EX)
   path=BASE/'controller.json'
   state=json.loads(path.read_text()) if path.exists() else {'enabled':False}
+  if action in ('stop','disable'):
+   state['enabled']=False
+   state['message']='24/7 đã tắt; đang xử lý yêu cầu dừng' if action=='stop' else '24/7 đã tắt; phiên hiện tại tiếp tục chạy'
+   tmp=path.with_suffix('.tmp');tmp.write_text(json.dumps(state));tmp.chmod(0o644);tmp.replace(path)
+   if action=='disable':return state
   runs=json.loads(gh('run','list','-R',REPO,'--workflow',WORKFLOW,'--limit','8','--json','databaseId,status,conclusion,url'))
   active=[r for r in runs if r['status']!='completed']
   saved=BASE/'published.json';published=json.loads(saved.read_text()) if saved.exists() else {}
   unchanged=(BASE/'completed-without-launch'/str(state.get('last_run'))).is_file()
+  previous=next((r for r in runs if r['databaseId']==state.get('last_run')),None)
+  if previous and previous['status']=='completed' and not final_ready(state,published,unchanged):
+   jobs=json.loads(gh('api','repos/'+REPO+'/actions/runs/'+str(previous['databaseId'])+'/jobs'))
+   worker_steps=[step for job in jobs.get('jobs',[]) for step in job.get('steps',[]) if step['name']=='Start and monitor Minecraft worker']
+   if not worker_steps or all(step.get('conclusion')=='skipped' for step in worker_steps):unchanged=True
   def dispatch():
    output=gh('workflow','run',WORKFLOW,'-R',REPO,'--ref','main','-f','duration_minutes=330')
    match=re.search(r'/runs/(\d+)',output)

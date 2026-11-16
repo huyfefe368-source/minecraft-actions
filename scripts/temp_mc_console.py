@@ -42,8 +42,10 @@ class Handler(BaseHTTPRequestHandler):
             size=int(self.headers.get('Content-Length','0'))
             if not 0<size<=4096:raise ValueError('Invalid request size')
             payload=self.rfile.read(size)
-            if urlsplit(self.path).path=='/api/control':
-                action=json.loads(payload).get('action')
+            request=json.loads(payload)
+            if not isinstance(request,dict):raise ValueError('Invalid request')
+            if urlsplit(self.path).path=='/api/control' or str(request.get('command','')).strip().lower()=='stop':
+                action=request.get('action') if urlsplit(self.path).path=='/api/control' else 'stop'
                 if action not in ('start','stop','enable','disable'):raise ValueError('Invalid action')
                 r=subprocess.run(['sudo','-n','/opt/mc-temp12111/control',action],capture_output=True,text=True,timeout=40)
                 return self.reply(200 if r.returncode==0 else 502,json.loads(r.stdout or '{"error":"Controller unavailable"}'))
